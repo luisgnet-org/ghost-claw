@@ -1,38 +1,983 @@
 #!/usr/bin/env python3
 """mem — Swiss army knife for navigating session JSONL files.
 
-Hybrid semantic (sentence-transformers) + BM25 keyword search with recency
-boost. Every result includes provenance: session ID, line number, timestamp.
+Searches both agent sessions AND host Claude Code CLI sessions.
 
-Commands:
-    mem search "query"           Hybrid semantic + keyword search
-    mem search "query" --user    Filter to operator messages only
-    mem grep "exact text"        Exact string match (fast, precise)
-    mem session <id-prefix>      Dump a specific session's conversation
-    mem context <id-prefix> <n>  Show ±10 lines around line n
-    mem recent [n]               Last n sessions with timestamps
-    mem warmup                   Pre-cache recent sessions for fast search
-    mem ls                       List all session files
+Usage:
+    mem search <query>              Semantic search (sff embeddings + BM25 hybrid)
+    mem grep <query>                Exact text search across all sessions
+    mem session <id> [--full]       Show a session's conversation (user+assistant)
+    mem context <id> <line> [-n N]  Show N messages around a specific line
+    mem recent [N]                  List N most recent sessions with summaries
+    mem around <timestamp>          Find what was happening at a given time
+    mem warmup [topic]              Boot context: recent sessions + topic-relevant history
+    mem ask <question>              Print subagent playbook for abstract memory reasoning
+    mem ls [--cli] [--agent]        List all sessions with dates and message counts
 
-TODO: Port and generalize from live agent. The full implementation includes:
-- Hybrid SFF (small-form-factor) embeddings + BM25 retrieval
-- Recency-biased ranking
-- JSONL parsing for both agent and CLI sessions
-- The 'ask' subcommand for spawning reasoning agents over session history
-- Configurable session directories and username patterns
+Flags for search/grep:
+    --user / --operator             Only search user/operator messages
+    --assistant / --agent           Only search assistant messages
+    --cli                           Only search host CLI sessions
+    --agent                         Only search agent sessions
+    --limit N                       Max results (default 20)
 
-The mem tool is the single most important tool in the agent's toolkit.
-It's what makes 600+ sessions of conversation searchable and useful.
-Without it, every session starts from zero.
+Every result includes provenance: session file, line number, timestamp.
 """
 
+import json
+import math
+import os
+import re
+import subprocess
 import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+# ── Configuration ──────────────────────────────────────────────────────────
+#
+# All paths and identity-specific settings live here. Override via environment
+# variables or edit the defaults below.
+#
+# MEM_SESSIONS_DIR     — agent session JSONL directory (primary session store)
+# MEM_CLI_SESSIONS_DIR — extracted host CLI sessions (claude_session_sync output)
+# MEM_CACHE_DIR        — cache directory for sff embedding files
+# MEM_SFF_BIN          — path to the `sff` binary (https://github.com/...)
+# MEM_USER_LABEL       — display label for the operator/user in session output
+# MEM_AGENT_LABEL      — display label for the agent in session output
+# MEM_USER_PATTERN     — regex pattern matching the user's handle in injected
+#                        message prefixes, e.g. r'\[operator\]' or r'\[operator\]'
+#                        Set to empty string to disable prefix stripping.
+# MEM_WORKSPACE_DIR    — workspace root (used in help text for the `ask` command)
+
+_HOME = Path.home()
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_WORKSPACE_DIR = Path(os.environ.get(
+    "MEM_WORKSPACE_DIR",
+    str(_SCRIPT_DIR.parent)  # one level up from bin/
+))
+
+SESSIONS_DIR = Path(os.environ.get(
+    "MEM_SESSIONS_DIR",
+    os.path.expanduser("~/.claude/projects/default-workspace")
+))
+
+# CLI sessions extracted by daemon workflows (claude_session_sync, opencode_session_sync).
+# Set to an empty string or non-existent path to disable CLI session search.
+CLI_SESSIONS_DIR = Path(os.environ.get(
+    "MEM_CLI_SESSIONS_DIR",
+    str(_WORKSPACE_DIR / "cli_sessions")
+))
+
+SFF_BIN = os.environ.get(
+    "MEM_SFF_BIN",
+    str(_HOME / ".cargo" / "bin" / "sff")
+)
+
+CACHE_DIR = Path(os.environ.get(
+    "MEM_CACHE_DIR",
+    os.path.expanduser("~/.cache/mem")
+))
+
+# Display labels for roles in output
+USER_LABEL = os.environ.get("MEM_USER_LABEL", "USER")
+AGENT_LABEL = os.environ.get("MEM_AGENT_LABEL", "AGENT")
+
+# Regex pattern that matches the user's handle as injected into messages by the
+# io-bridge hook, e.g. '[operator]' or '[operator]'. Used for boilerplate
+# stripping and warmup formatting. Set to empty string to disable.
+_USER_PATTERN_RAW = os.environ.get("MEM_USER_PATTERN", r"\[operator\]")
+_USER_PATTERN = re.compile(_USER_PATTERN_RAW) if _USER_PATTERN_RAW else None
+
+
+# ── Boilerplate patterns to strip ──────────────────────────────────────────
+
+def _build_boilerplate_patterns():
+    patterns = [
+        # System injection in user messages
+        re.compile(r'Respond to these messages via Telegram first\..*?proactive work\.', re.DOTALL),
+        # Heartbeat boilerplate
+        re.compile(r'Clean heartbeat — nothing to do\. Journal updated\. Exiting\.'),
+        # Session close boilerplate
+        re.compile(r'Session closed\. Tags:.*', re.DOTALL),
+        # Tool call noise
+        re.compile(r'^\(tool calls only\)$', re.MULTILINE),
+        # Empty "let me" transitions
+        re.compile(r'^(?:Let me |Now let me |I\'ll )(?:check|read|look|wait|search).*?\.?\s*$', re.MULTILINE),
+    ]
+    # Strip the user's handle prefix from injected messages (e.g. "[operator]")
+    if _USER_PATTERN_RAW:
+        patterns.append(
+            re.compile(r'^New messages:\s*\n\n' + _USER_PATTERN_RAW + r'\s*', re.MULTILINE)
+        )
+    return patterns
+
+
+_BOILERPLATE_PATTERNS = _build_boilerplate_patterns()
+
+
+def strip_boilerplate(text):
+    """Remove system boilerplate and low-signal text."""
+    for pattern in _BOILERPLATE_PATTERNS:
+        text = pattern.sub('', text)
+    return text.strip()
+
+
+# ── Core helpers ───────────────────────────────────────────────────────────
+
+def _is_extracted_format(path):
+    """Check if a JSONL file uses the extracted format (from claude_session_sync)."""
+    try:
+        with open(path) as f:
+            first = f.readline().strip()
+            if first:
+                obj = json.loads(first)
+                return obj.get("_meta", False)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return False
+
+
+def parse_jsonl(path):
+    """Yield (line_number, parsed_obj) from a JSONL file."""
+    with open(path) as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield i, json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def extract_text(obj):
+    """Extract human-readable text from a JSONL entry. Returns (role, text) or None.
+
+    Handles two formats:
+    - Raw Claude Code JSONL: {type, message: {content: [...]}}
+    - Extracted compact JSONL: {ts, role, text, session, project}
+    """
+    # Extracted format (from claude_session_sync)
+    if "text" in obj and "role" in obj and obj.get("_meta") is not True:
+        role = obj["role"]
+        text = obj["text"]
+        if role in ("user", "assistant") and text and text.strip():
+            return (role, text)
+        return None
+
+    # Raw Claude Code format
+    entry_type = obj.get("type")
+
+    if entry_type == "user":
+        msg = obj.get("message", {})
+        content = msg.get("content", "")
+        if isinstance(content, str) and content.strip():
+            return ("user", content)
+        elif isinstance(content, list):
+            texts = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("tool_use_id"):
+                        return None
+                    if block.get("type") == "text":
+                        texts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    texts.append(block)
+            if texts:
+                return ("user", "\n".join(texts))
+        return None
+
+    elif entry_type == "assistant":
+        msg = obj.get("message", {})
+        content = msg.get("content", [])
+        if isinstance(content, str) and content.strip():
+            return ("assistant", content)
+        elif isinstance(content, list):
+            texts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+            if texts:
+                return ("assistant", "\n".join(texts))
+        return None
+
+    return None
+
+
+def get_timestamp(obj):
+    return obj.get("timestamp", "") or obj.get("ts", "")
+
+
+def session_id_from_path(path):
+    stem = Path(path).stem
+    # Extracted format: session_20260203_051547_a71bbbf2 -> extract the id part
+    if stem.startswith("session_") and "_" in stem:
+        return stem.split("_")[-1]
+    return stem
+
+
+def list_sessions(source=None):
+    """Return list of (path, mtime) sorted by mtime desc.
+
+    source: None=all, 'agent'=agent sessions only, 'cli'=CLI sessions only
+    """
+    sessions = []
+    if source != "cli":
+        if SESSIONS_DIR.exists():
+            for f in SESSIONS_DIR.glob("*.jsonl"):
+                sessions.append((f, f.stat().st_mtime))
+    if source != "agent" and CLI_SESSIONS_DIR.exists():
+        for f in CLI_SESSIONS_DIR.rglob("*.jsonl"):
+            if f.name.endswith(".prev.jsonl"):
+                continue
+            sessions.append((f, f.stat().st_mtime))
+    sessions.sort(key=lambda x: -x[1])
+    return sessions
+
+
+def get_session_by_prefix(prefix):
+    prefix = prefix.lower()
+    # Check agent sessions
+    if SESSIONS_DIR.exists():
+        for f in SESSIONS_DIR.glob("*.jsonl"):
+            if f.stem.lower().startswith(prefix):
+                return f
+    # Check CLI sessions (stem is like session_20260203_051547_a71bbbf2)
+    if CLI_SESSIONS_DIR.exists():
+        for f in CLI_SESSIONS_DIR.rglob("*.jsonl"):
+            if f.name.endswith(".prev.jsonl"):
+                continue
+            # Match against the session ID in the filename (last segment after _)
+            sid_in_name = f.stem.split("_")[-1] if "_" in f.stem else f.stem
+            if sid_in_name.lower().startswith(prefix):
+                return f
+            # Also match the full stem
+            if f.stem.lower().startswith(prefix):
+                return f
+    return None
+
+
+# ── Role label helpers ─────────────────────────────────────────────────────
+
+def _role_label(role, is_cli=False):
+    """Return the display label for a role."""
+    if role == "user":
+        return USER_LABEL
+    # For CLI sessions, fall back to a generic "CLAUDE" or the configured agent label
+    if is_cli:
+        return "CLAUDE"
+    return AGENT_LABEL
+
+
+def _sff_role_label(role):
+    """Return the compact role label used inside sff cache files."""
+    if role == "user":
+        return USER_LABEL
+    return AGENT_LABEL
+
+
+# ── Commands ───────────────────────────────────────────────────────────────
+
+def _session_source_tag(path):
+    """Return a short tag indicating session source."""
+    path_str = str(path)
+    if "cli_sessions" in path_str:
+        # Extract project from metadata header
+        try:
+            with open(path) as f:
+                meta = json.loads(f.readline())
+                if meta.get("_meta"):
+                    return f"cli:{meta.get('project', '?')}"
+        except (json.JSONDecodeError, OSError):
+            pass
+        return "cli"
+    return "agent"
+
+
+def cmd_ls(args):
+    # Parse --cli / --agent flags
+    source = None
+    remaining = []
+    for a in (args or []):
+        if a == "--cli":
+            source = "cli"
+        elif a == "--agent":
+            source = "agent"
+        else:
+            remaining.append(a)
+    sessions = list_sessions(source=source)
+    limit = int(remaining[0]) if remaining else len(sessions)
+    for path, mtime in sessions[:limit]:
+        sid = session_id_from_path(path)
+        dt = datetime.fromtimestamp(mtime)
+        tag = _session_source_tag(path)
+        msg_count = 0
+        first_user_msg = ""
+        for _, obj in parse_jsonl(path):
+            result = extract_text(obj)
+            if result:
+                msg_count += 1
+                if result[0] == "user" and not first_user_msg:
+                    text = result[1].replace("\n", " ")[:80]
+                    first_user_msg = text
+        print(f"{sid[:8]}  {dt:%Y-%m-%d %H:%M}  [{tag:.<20s}]  {msg_count:3d} msgs  {first_user_msg}")
+
+
+def cmd_recent(args):
+    n = int(args[0]) if args else 10
+    cmd_ls([str(n)])
+
+
+def cmd_session(args):
+    if not args:
+        print("Usage: mem session <session-id-prefix> [--full]", file=sys.stderr)
+        sys.exit(1)
+    full = "--full" in args
+    sid_prefix = args[0]
+    path = get_session_by_prefix(sid_prefix)
+    if not path:
+        print(f"No session found matching '{sid_prefix}'", file=sys.stderr)
+        sys.exit(1)
+    sid = session_id_from_path(path)
+    is_cli = "cli_sessions" in str(path)
+    tag = " (CLI session)" if is_cli else ""
+    print(f"=== Session {sid}{tag} ===\n")
+    for lineno, obj in parse_jsonl(path):
+        result = extract_text(obj)
+        if not result:
+            continue
+        role, text = result
+        ts = get_timestamp(obj)
+        ts_short = ts[11:19] if len(ts) > 19 else ts
+        if not full and len(text) > 500:
+            text = text[:500] + "..."
+        label = _role_label(role, is_cli=is_cli)
+        print(f"[L{lineno:03d} {ts_short}] {label}:")
+        print(f"  {text}")
+        print()
+
+
+def cmd_context(args):
+    if len(args) < 2:
+        print("Usage: mem context <session-id-prefix> <line> [-n N]", file=sys.stderr)
+        sys.exit(1)
+    sid_prefix = args[0]
+    target_line = int(args[1])
+    n = 5
+    if "-n" in args:
+        idx = args.index("-n")
+        if idx + 1 < len(args):
+            n = int(args[idx + 1])
+    path = get_session_by_prefix(sid_prefix)
+    if not path:
+        print(f"No session found matching '{sid_prefix}'", file=sys.stderr)
+        sys.exit(1)
+    entries = []
+    for lineno, obj in parse_jsonl(path):
+        result = extract_text(obj)
+        if result:
+            entries.append((lineno, obj, result))
+    target_idx = 0
+    for i, (lineno, _, _) in enumerate(entries):
+        if lineno <= target_line:
+            target_idx = i
+        else:
+            break
+    start = max(0, target_idx - n)
+    end = min(len(entries), target_idx + n + 1)
+    sid = session_id_from_path(path)
+    is_cli = "cli_sessions" in str(path)
+    print(f"=== Session {sid} — context around L{target_line:03d} ===\n")
+    for i in range(start, end):
+        lineno, obj, (role, text) = entries[i]
+        ts = get_timestamp(obj)
+        ts_short = ts[11:19] if len(ts) > 19 else ts
+        marker = " >>>" if lineno == target_line or i == target_idx else "    "
+        label = _role_label(role, is_cli=is_cli)
+        if len(text) > 300:
+            text = text[:300] + "..."
+        print(f"{marker} [L{lineno:03d} {ts_short}] {label}: {text}")
+        print()
+
+
+# ── Search infrastructure ──────────────────────────────────────────────────
+
+def _parse_search_args(args):
+    limit = 20
+    query_parts = []
+    role_filter = None
+    source_filter = None  # None=all, 'cli', 'agent'
+    i = 0
+    while i < len(args):
+        if args[i] == "--limit" and i + 1 < len(args):
+            limit = int(args[i + 1])
+            i += 2
+        elif args[i] in ("--user", "--operator"):
+            role_filter = "user"
+            i += 1
+        elif args[i] in ("--assistant", "--claw"):
+            role_filter = "assistant"
+            i += 1
+        elif args[i] == "--cli":
+            source_filter = "cli"
+            i += 1
+        elif args[i] == "--agent":
+            source_filter = "agent"
+            i += 1
+        else:
+            query_parts.append(args[i])
+            i += 1
+    query = " ".join(query_parts)
+    return query, limit, role_filter, source_filter
+
+
+# ── sff (embedding) search ─────────────────────────────────────────────────
+
+def _sff_marker_pattern():
+    """Build the regex that matches role markers inside sff cache files.
+
+    Markers look like: [L042|USER|2026-02-26T06:00:00]
+    The role label is whatever USER_LABEL / AGENT_LABEL is configured to.
+    We match any non-] sequence so the pattern stays generic.
+    """
+    return re.compile(r'\[L(\d{3})\|([^|]+)\|([^\]]+)\]')
+
+
+_SFF_MARKER_RE = _sff_marker_pattern()
+
+
+def _extract_sessions_to_cache(role_filter=None, source=None):
+    """Extract conversation text from JSONL to cached .md files for sff."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    for path, mtime in list_sessions(source=source):
+        sid = session_id_from_path(path)
+        # Prefix CLI sessions to avoid ID collisions
+        prefix = "cli_" if "cli_sessions" in str(path) else ""
+        cache_file = CACHE_DIR / f"{prefix}{sid}.md"
+        if cache_file.exists() and cache_file.stat().st_mtime >= mtime:
+            continue
+        lines = []
+        is_cli = "cli_sessions" in str(path)
+        for lineno, obj in parse_jsonl(path):
+            result = extract_text(obj)
+            if not result:
+                continue
+            role, text = result
+            if role_filter and role != role_filter:
+                continue
+            text = strip_boilerplate(text)
+            if not text or len(text) < 10:
+                continue
+            ts = get_timestamp(obj)
+            label = _role_label(role, is_cli=is_cli)
+            lines.append(f"[L{lineno:03d}|{label}|{ts[:19]}]")
+            lines.append(text)
+            lines.append("")
+        cache_file.write_text("\n".join(lines))
+        os.utime(cache_file, (mtime, mtime))
+    return CACHE_DIR
+
+
+def _run_sff(query, cache_dir, limit):
+    """Run sff and return parsed, deduplicated results."""
+    # Ask sff for more results than needed so we can dedupe
+    sff_limit = limit * 3
+    result = subprocess.run(
+        [SFF_BIN, query, "-p", str(cache_dir), "-r", "-l", str(sff_limit), "--json"],
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        return None, None
+    sff_output = json.loads(result.stdout)
+
+    parsed = []
+    seen = set()  # (sid, lineno) for dedup
+
+    for hit in sff_output.get("results", []):
+        score = hit["score"]
+        file_path = hit["file_path"]
+        chunk = hit["chunk"]
+        line_number = hit.get("line_number", 0)
+        sid = Path(file_path).stem
+
+        # Extract provenance from markers embedded in the chunk
+        markers = _SFF_MARKER_RE.findall(chunk)
+        if markers:
+            jsonl_line = int(markers[0][0])
+            role_label = markers[0][1]
+            ts = markers[0][2]
+        else:
+            cache_file = CACHE_DIR / f"{sid}.md"
+            jsonl_line, role_label, ts = 0, "?", ""
+            if cache_file.exists():
+                cache_lines = cache_file.read_text().split("\n")
+                for i in range(min(line_number, len(cache_lines) - 1), -1, -1):
+                    m = _SFF_MARKER_RE.match(cache_lines[i])
+                    if m:
+                        jsonl_line, role_label, ts = int(m.group(1)), m.group(2), m.group(3)
+                        break
+
+        # Deduplicate by session + line
+        key = (sid[:8], jsonl_line)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        clean_chunk = _SFF_MARKER_RE.sub('', chunk).strip()
+        # Remove any trailing newline artifacts left after marker removal
+        clean_chunk = re.sub(r'\n{3,}', '\n\n', clean_chunk).strip()
+        if len(clean_chunk) > 200:
+            clean_chunk = clean_chunk[:200] + "..."
+
+        parsed.append((score, sid, jsonl_line, role_label, ts, clean_chunk))
+        if len(parsed) >= limit:
+            break
+
+    return parsed, sff_output
+
+
+# ── BM25 search ────────────────────────────────────────────────────────────
+
+STOP_WORDS = set("""
+a an the is it in to of and or for on at by with from as be this that was are
+were been have has had do does did will would could should may might can shall
+not no but if then so than too very just also how what when where which who whom
+why all each every some any few more most other much many such only same own its
+let me my i you your we our they them their he she his her it's don't doesn't
+didn't wasn't weren't haven't hasn't hadn't won't wouldn't couldn't shouldn't
+i'm i've i'll i'd you're you've you'll you'd we're we've we'll we'd they're
+they've they'll they'd he's she's it'll there's here's that's who's what's
+""".split())
+
+
+def tokenize(text):
+    text = strip_boilerplate(text)
+    words = re.findall(r'[a-z][a-z0-9_-]*', text.lower())
+    unigrams = [w for w in words if w not in STOP_WORDS and len(w) > 1]
+    bigrams = [f"{words[i]}_{words[i+1]}" for i in range(len(words) - 1)
+               if words[i] not in STOP_WORDS and words[i+1] not in STOP_WORDS
+               and len(words[i]) > 1 and len(words[i+1]) > 1]
+    return unigrams + bigrams
+
+
+def _build_index(role_filter=None, source=None):
+    documents = []
+    df = Counter()
+    for path, mtime in list_sessions(source=source):
+        sid = session_id_from_path(path)
+        for lineno, obj in parse_jsonl(path):
+            result = extract_text(obj)
+            if not result:
+                continue
+            role, text = result
+            if role_filter and role != role_filter:
+                continue
+            tokens = tokenize(text)
+            if not tokens:
+                continue
+            tf = Counter(tokens)
+            max_freq = max(tf.values())
+            tf_norm = {t: c / max_freq for t, c in tf.items()}
+            ts = get_timestamp(obj)
+            documents.append((sid, lineno, role, text, ts, path, tf_norm))
+            for term in set(tokens):
+                df[term] += 1
+    n_docs = len(documents)
+    idf = {}
+    if n_docs > 0:
+        for term, freq in df.items():
+            idf[term] = math.log(n_docs / (1 + freq))
+    return documents, idf
+
+
+def _bm25_search(query, documents, idf, limit=20):
+    query_tokens = tokenize(query)
+    if not query_tokens:
+        return []
+    k1, b = 1.5, 0.75
+    doc_lengths = [len(tokenize(text)) for _, _, _, text, _, _, _ in documents]
+    avg_dl = sum(doc_lengths) / max(len(doc_lengths), 1)
+    scored = []
+    query_term_set = set(query_tokens)
+    for idx, (sid, lineno, role, text, ts, path, tf_norm) in enumerate(documents):
+        dl = doc_lengths[idx]
+        score = 0.0
+        matched = 0
+        for term in query_term_set:
+            if term not in tf_norm:
+                continue
+            matched += 1
+            tf_raw = tf_norm[term] * dl if dl > 0 else 0
+            term_idf = idf.get(term, 0)
+            num = tf_raw * (k1 + 1)
+            den = tf_raw + k1 * (1 - b + b * (dl / max(avg_dl, 1)))
+            score += term_idf * (num / max(den, 0.001))
+        if score <= 0:
+            continue
+        coverage = matched / len(query_term_set)
+        score *= (0.5 + 0.5 * coverage)
+        scored.append((score, ts, sid, lineno, role, text, path))
+    scored.sort(key=lambda x: -x[0])
+    return scored[:limit]
+
+
+# ── Hybrid search (sff + BM25) ────────────────────────────────────────────
+
+def _recency_boost(ts_str):
+    """Return a small multiplier (1.0-1.15) for recent results."""
+    if not ts_str or len(ts_str) < 10:
+        return 1.0
+    try:
+        now = datetime.now(timezone.utc)
+        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        age_hours = (now - ts).total_seconds() / 3600
+        if age_hours < 24:
+            return 1.15
+        elif age_hours < 72:
+            return 1.10
+        elif age_hours < 168:  # 1 week
+            return 1.05
+        return 1.0
+    except (ValueError, TypeError):
+        return 1.0
+
+
+def cmd_search(args):
+    """Hybrid semantic search: sff embeddings + BM25, with recency boost."""
+    if not args:
+        print(
+            "Usage: mem search <query> [--limit N] [--user] [--assistant] [--cli] [--agent]",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
+    query, limit, role_filter, source_filter = _parse_search_args(args)
+    if not query:
+        print("No query provided", file=sys.stderr)
+        sys.exit(1)
+
+    sff_available = os.path.isfile(SFF_BIN) and os.access(SFF_BIN, os.X_OK)
+    sff_results = None
+
+    if sff_available:
+        print("Extracting sessions...", file=sys.stderr, end=" ", flush=True)
+        cache_dir = _extract_sessions_to_cache(role_filter, source=source_filter)
+        n_files = len(list(cache_dir.glob("*.md")))
+        print(f"{n_files} cached.", file=sys.stderr, end=" ", flush=True)
+
+        try:
+            sff_results, sff_output = _run_sff(query, cache_dir, limit * 2)
+            if sff_results:
+                search_time = sff_output.get("search_time_ms", 0)
+                print(f"sff {search_time:.0f}ms.", file=sys.stderr)
+        except Exception as e:
+            print(f"sff failed: {e}", file=sys.stderr)
+
+    # Also run BM25
+    print("BM25...", file=sys.stderr, end=" ", flush=True)
+    documents, idf = _build_index(role_filter, source=source_filter)
+    bm25_results = _bm25_search(query, documents, idf, limit * 2)
+    print(f"{len(documents)} msgs.", file=sys.stderr)
+
+    # Merge: normalize scores from each engine to [0,1], combine
+    merged = {}  # key = (sid[:8], lineno) -> combined score + metadata
+
+    if sff_results:
+        max_sff = max((r[0] for r in sff_results), default=1.0)
+        for score, sid, lineno, role_label, ts, chunk in sff_results:
+            key = (sid[:8], lineno)
+            norm_score = score / max_sff if max_sff > 0 else 0
+            # sff gets 60% weight
+            recency = _recency_boost(ts)
+            merged[key] = {
+                "score": norm_score * 0.6 * recency,
+                "sid": sid, "lineno": lineno, "role": role_label,
+                "ts": ts, "text": chunk, "source": "sff"
+            }
+
+    if bm25_results:
+        max_bm25 = max((r[0] for r in bm25_results), default=1.0)
+        for score, ts, sid, lineno, role, text, path in bm25_results:
+            key = (sid[:8], lineno)
+            norm_score = score / max_bm25 if max_bm25 > 0 else 0
+            is_cli = "cli_sessions" in str(path)
+            label = _role_label(role, is_cli=is_cli)
+            recency = _recency_boost(ts)
+            bm25_contrib = norm_score * 0.4 * recency
+
+            if key in merged:
+                # Combine scores
+                merged[key]["score"] += bm25_contrib
+                merged[key]["source"] = "hybrid"
+            else:
+                snippet = text.replace("\n", " ")
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "..."
+                ts_short = ts[:19] if len(ts) > 19 else ts
+                merged[key] = {
+                    "score": bm25_contrib,
+                    "sid": sid, "lineno": lineno, "role": label,
+                    "ts": ts_short, "text": snippet, "source": "bm25"
+                }
+
+    # Sort by combined score
+    ranked = sorted(merged.values(), key=lambda x: -x["score"])[:limit]
+
+    if not ranked:
+        print(f"No results for '{query}'")
+        return
+
+    print(f"\nTop {len(ranked)} results for '{query}':\n")
+    for r in ranked:
+        engine = f" [{r['source']}]" if r["source"] != "hybrid" else ""
+        print(f"  [{r['ts']}] {r['sid'][:8]}:L{r['lineno']:03d} {r['role']}  "
+              f"(score: {r['score']:.3f}{engine})")
+        print(f"    {r['text']}")
+        print()
+
+
+# ── Grep (exact text) ─────────────────────────────────────────────────────
+
+def cmd_grep(args):
+    if not args:
+        print(
+            "Usage: mem grep <query> [--limit N] [--user] [--assistant] [--cli] [--agent]",
+            file=sys.stderr
+        )
+        sys.exit(1)
+    query, limit, role_filter, source_filter = _parse_search_args(args)
+    query_lower = query.lower()
+    results = []
+    for path, mtime in list_sessions(source=source_filter):
+        sid = session_id_from_path(path)
+        is_cli = "cli_sessions" in str(path)
+        for lineno, obj in parse_jsonl(path):
+            result = extract_text(obj)
+            if not result:
+                continue
+            role, text = result
+            if role_filter and role != role_filter:
+                continue
+            if query_lower in text.lower():
+                ts = get_timestamp(obj)
+                results.append((ts, sid, lineno, role, text, path, is_cli))
+    results.sort(key=lambda x: x[0], reverse=True)
+    if not results:
+        print(f"No results for '{query}'")
+        return
+    print(f"Found {len(results)} matches for '{query}' (showing {min(limit, len(results))}):\n")
+    for ts, sid, lineno, role, text, path, is_cli in results[:limit]:
+        ts_short = ts[:19] if len(ts) > 19 else ts
+        label = _role_label(role, is_cli=is_cli)
+        idx = text.lower().find(query_lower)
+        start = max(0, idx - 60)
+        end = min(len(text), idx + len(query_lower) + 60)
+        snippet = text[start:end].replace("\n", " ")
+        if start > 0:
+            snippet = "..." + snippet
+        if end < len(text):
+            snippet = snippet + "..."
+        print(f"  [{ts_short}] {sid[:8]}:L{lineno:03d} {label}")
+        print(f"    {snippet}")
+        print()
+
+
+# ── Around (timestamp) ────────────────────────────────────────────────────
+
+def cmd_around(args):
+    if not args:
+        print("Usage: mem around <timestamp>  (UTC, e.g. 2026-02-26T06:00)", file=sys.stderr)
+        sys.exit(1)
+    target = " ".join(args).replace(" ", "T")
+    if len(target) <= 16:
+        target += ":00"
+    results = []
+    for path, mtime in list_sessions():
+        sid = session_id_from_path(path)
+        is_cli = "cli_sessions" in str(path)
+        entries_with_ts = []
+        for lineno, obj in parse_jsonl(path):
+            ts = get_timestamp(obj)
+            result = extract_text(obj)
+            if result and ts:
+                entries_with_ts.append((lineno, obj, result, ts))
+        if not entries_with_ts:
+            continue
+        first_ts = entries_with_ts[0][3][:19]
+        last_ts = entries_with_ts[-1][3][:19]
+        target_cmp = target[:19]
+        if first_ts <= target_cmp <= last_ts:
+            best_idx = 0
+            for i, (_, _, _, ts) in enumerate(entries_with_ts):
+                if ts[:19] <= target_cmp:
+                    best_idx = i
+            start = max(0, best_idx - 3)
+            end = min(len(entries_with_ts), best_idx + 4)
+            print(f"=== Session {sid[:8]} (around {target}) ===\n")
+            for j in range(start, end):
+                lineno, obj, (role, text), ts = entries_with_ts[j]
+                ts_short = ts[11:19] if len(ts) > 19 else ts
+                label = _role_label(role, is_cli=is_cli)
+                marker = " >>>" if j == best_idx else "    "
+                if len(text) > 200:
+                    text = text[:200] + "..."
+                print(f"{marker} [L{lineno:03d} {ts_short}] {label}: {text}")
+                print()
+            results.append(sid)
+    if not results:
+        print(f"No sessions found around {target}")
+        print("Note: timestamps in JSONL are UTC.")
+
+
+# ── Warmup (boot context) ─────────────────────────────────────────────────
+
+def cmd_warmup(args):
+    """Boot context: show recent sessions + topic-relevant history.
+
+    Usage: mem warmup [topic_keyword]
+    """
+    topic = " ".join(args) if args else ""
+    sessions = list_sessions()
+
+    # Part 1: Last 3 sessions summary
+    print("=== Recent Sessions ===\n")
+    for path, mtime in sessions[:3]:
+        sid = session_id_from_path(path)
+        dt = datetime.fromtimestamp(mtime)
+        is_cli = "cli_sessions" in str(path)
+        user_msgs = []
+        asst_msgs = []
+        for _, obj in parse_jsonl(path):
+            result = extract_text(obj)
+            if not result:
+                continue
+            role, text = result
+            clean = strip_boilerplate(text)
+            if not clean or len(clean) < 10:
+                continue
+            if role == "user":
+                user_msgs.append(clean)
+            else:
+                asst_msgs.append(clean)
+
+        # First substantive user message
+        first_user = ""
+        for msg in user_msgs:
+            # Skip messages that are only the operator's handle prefix
+            if _USER_PATTERN and _USER_PATTERN.fullmatch(msg.strip()):
+                continue
+            if len(msg) > 20:
+                first_user = msg[:120].replace("\n", " ")
+                break
+
+        # Last substantive assistant message (often a summary or handoff)
+        last_asst = ""
+        for msg in reversed(asst_msgs):
+            if len(msg) > 30:
+                last_asst = msg[:120].replace("\n", " ")
+                break
+
+        print(f"  {sid[:8]} ({dt:%Y-%m-%d %H:%M}) — {len(user_msgs)}u/{len(asst_msgs)}a msgs")
+        if first_user:
+            print(f"    {USER_LABEL}: {first_user}")
+        if last_asst:
+            lbl = "CLAUDE" if is_cli else AGENT_LABEL
+            print(f"    {lbl}: {last_asst}")
+        print()
+
+    # Part 2: Topic-relevant history (if topic provided)
+    if topic:
+        print(f"=== Relevant to '{topic}' ===\n")
+        sff_available = os.path.isfile(SFF_BIN) and os.access(SFF_BIN, os.X_OK)
+        if sff_available:
+            cache_dir = _extract_sessions_to_cache()
+            try:
+                results, sff_output = _run_sff(topic, cache_dir, 5)
+                if results:
+                    for score, sid, lineno, role_label, ts, chunk in results:
+                        print(f"  [{ts}] {sid[:8]}:L{lineno:03d} {role_label} ({score:.2f})")
+                        print(f"    {chunk}")
+                        print()
+            except Exception:
+                pass
+
+
+# ── Ask (subagent playbook) ────────────────────────────────────────────────
+
+def cmd_ask(args):
+    """Print the playbook for answering abstract memory questions via subagent."""
+    if not args:
+        print("Usage: mem ask <question>", file=sys.stderr)
+        print("\nPrints a Task agent prompt template for reasoning over memory.", file=sys.stderr)
+        print("Copy the output into a Task tool call with model='sonnet'.", file=sys.stderr)
+        sys.exit(1)
+
+    question = " ".join(args)
+
+    print(f"""## mem ask — subagent playbook
+
+**Question:** {question}
+
+**Instructions:** Spawn a Task agent (model: sonnet, subagent_type: general-purpose) with this prompt:
+
+---
+
+You have access to a memory search CLI. All commands run from `{_WORKSPACE_DIR}`.
+
+**Tools available:**
+- `python3 bin/mem search "query"` — hybrid semantic + keyword search across ALL sessions (agent + CLI, top 20 results)
+- `python3 bin/mem search "query" --user` — filter to only the operator's messages
+- `python3 bin/mem search "query" --assistant` — filter to only the agent's messages
+- `python3 bin/mem search "query" --cli` — search only host Claude Code sessions
+- `python3 bin/mem search "query" --agent` — search only agent sessions
+- `python3 bin/mem context <session-id-prefix> <line>` — show ±5 messages around a specific point (use to understand full context of a hit)
+- `python3 bin/mem grep "exact text"` — exact string match (fast, precise)
+
+Note: CLI session IDs are 8-char prefixes like `4a07`, `27b3`, etc. Agent sessions are full UUIDs.
+
+**Your task:** Answer this question by searching across agent sessions and host CLI sessions between the operator (human) and various Claude instances:
+
+**"{question}"**
+
+**Strategy:**
+1. Start with 3-5 diverse search queries that approach the question from different angles
+2. For promising hits, use `mem context` to understand the full conversation around them
+3. Look for PATTERNS across multiple sessions, not just individual moments
+4. Cite specific evidence: session IDs, dates, exact quotes when possible
+
+**Output:** A concise answer (under 300 words) with specific examples, dates, and session references. Lead with the insight, support with evidence. No hedging — take a position.
+
+---""")
+
+
+# ── CLI dispatch ───────────────────────────────────────────────────────────
+
+COMMANDS = {
+    "search": cmd_search,
+    "grep": cmd_grep,
+    "session": cmd_session,
+    "context": cmd_context,
+    "recent": cmd_recent,
+    "around": cmd_around,
+    "warmup": cmd_warmup,
+    "ask": cmd_ask,
+    "ls": cmd_ls,
+}
+
 
 def main():
-    print("mem is a stub. Run the upgrade playbook to port the full")
-    print("implementation from the live agent.")
-    print()
-    print("Expected location for session logs: memory/log/")
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(__doc__)
+        sys.exit(0)
+    cmd = sys.argv[1]
+    if cmd not in COMMANDS:
+        print(f"Unknown command: {cmd}", file=sys.stderr)
+        print(f"Available: {', '.join(COMMANDS.keys())}", file=sys.stderr)
+        sys.exit(1)
+    COMMANDS[cmd](sys.argv[2:])
+
 
 if __name__ == "__main__":
     main()
