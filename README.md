@@ -1,6 +1,6 @@
 # ghost-claw
 
-A personality plugin for [ghost](https://github.com/operator/ghost) — turns a
+A personality plugin for ghost — turns a
 stateless Claude Code session into a persistent agent with memory, identity, and
 opinions.
 
