@@ -1,0 +1,18 @@
+# Secrets
+secrets/
+
+# Runtime state
+.claude/
+.mcp.json
+inbox/
+*.pid
+
+# OS
+.DS_Store
+__pycache__
+*.pyc
+
+# Databases (session search index)
+*.db
+*.db-shm
+*.db-wal

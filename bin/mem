@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""mem — Swiss army knife for navigating session JSONL files.
+
+Hybrid semantic (sentence-transformers) + BM25 keyword search with recency
+boost. Every result includes provenance: session ID, line number, timestamp.
+
+Commands:
+    mem search "query"           Hybrid semantic + keyword search
+    mem search "query" --user    Filter to operator messages only
+    mem grep "exact text"        Exact string match (fast, precise)
+    mem session <id-prefix>      Dump a specific session's conversation
+    mem context <id-prefix> <n>  Show ±10 lines around line n
+    mem recent [n]               Last n sessions with timestamps
+    mem warmup                   Pre-cache recent sessions for fast search
+    mem ls                       List all session files
+
+TODO: Port and generalize from live agent. The full implementation includes:
+- Hybrid SFF (small-form-factor) embeddings + BM25 retrieval
+- Recency-biased ranking
+- JSONL parsing for both agent and CLI sessions
+- The 'ask' subcommand for spawning reasoning agents over session history
+- Configurable session directories and username patterns
+
+The mem tool is the single most important tool in the agent's toolkit.
+It's what makes 600+ sessions of conversation searchable and useful.
+Without it, every session starts from zero.
+"""
+
+import sys
+
+def main():
+    print("mem is a stub. Run the upgrade playbook to port the full")
+    print("implementation from the live agent.")
+    print()
+    print("Expected location for session logs: memory/log/")
+
+if __name__ == "__main__":
+    main()
