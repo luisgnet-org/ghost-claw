@@ -284,9 +284,114 @@ def quota_direct():
     print(json.dumps(result, indent=2))
 
 
+def cost_direct():
+    """Print API-equivalent cost summary without the ghost daemon."""
+    now = datetime.now()
+    sessions_root = _GHOST_HOME / "agents" / "claw" / "sessions"
+
+    # Get current session_id from quota_start snapshot
+    session_id = None
+    try:
+        snap = json.loads(_QUOTA_START_FILE.read_text())
+        session_id = snap.get("session_id")
+    except Exception:
+        pass
+
+    week = {"cost_usd": 0.0, "session_count": 0}
+    month = {"cost_usd": 0.0, "session_count": 0}
+    current = {}
+
+    month_dir = sessions_root / now.strftime("%Y/%m")
+    if month_dir.exists():
+        for day_dir in sorted(month_dir.iterdir()):
+            if not day_dir.is_dir():
+                continue
+            try:
+                day_num = int(day_dir.name)
+            except ValueError:
+                continue
+            days_ago = (now.date() - now.replace(day=day_num).date()).days
+            in_week = days_ago < 7
+
+            for session_dir in day_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                for jsonl in session_dir.glob("*.jsonl"):
+                    try:
+                        cost = input_tok = output_tok = turns = duration_ms = 0
+                        for line in jsonl.read_text().splitlines():
+                            if not line.strip():
+                                continue
+                            msg = json.loads(line)
+                            if msg.get("type") == "result":
+                                cost = msg.get("total_cost_usd", 0.0)
+                                usage = msg.get("usage", {})
+                                input_tok = usage.get("input_tokens", 0)
+                                output_tok = usage.get("output_tokens", 0)
+                                turns = msg.get("num_turns", 0)
+                                duration_ms = msg.get("duration_ms", 0)
+                        if not cost:
+                            continue
+                        month["cost_usd"] += cost
+                        month["session_count"] += 1
+                        if in_week:
+                            week["cost_usd"] += cost
+                            week["session_count"] += 1
+                        if session_id and session_dir.name == session_id:
+                            current = {
+                                "session_id": session_id,
+                                "cost_usd": round(cost, 4),
+                                "input_tokens": input_tok,
+                                "output_tokens": output_tok,
+                                "total_tokens": input_tok + output_tok,
+                                "num_turns": turns,
+                                "duration_minutes": round(duration_ms / 60_000, 1) if duration_ms else None,
+                            }
+                    except Exception:
+                        continue
+
+    # Fall back to latest symlink for current session if not found above
+    if session_id and not current:
+        latest = sessions_root / "latest"
+        if latest.exists():
+            for jsonl in latest.glob("*.jsonl"):
+                try:
+                    cost = input_tok = output_tok = turns = duration_ms = 0
+                    for line in jsonl.read_text().splitlines():
+                        if not line.strip():
+                            continue
+                        msg = json.loads(line)
+                        if msg.get("type") == "result":
+                            cost = msg.get("total_cost_usd", 0.0)
+                            usage = msg.get("usage", {})
+                            input_tok = usage.get("input_tokens", 0)
+                            output_tok = usage.get("output_tokens", 0)
+                            turns = msg.get("num_turns", 0)
+                            duration_ms = msg.get("duration_ms", 0)
+                    if cost:
+                        current = {
+                            "session_id": session_id,
+                            "cost_usd": round(cost, 4),
+                            "input_tokens": input_tok,
+                            "output_tokens": output_tok,
+                            "total_tokens": input_tok + output_tok,
+                            "num_turns": turns,
+                            "duration_minutes": round(duration_ms / 60_000, 1) if duration_ms else None,
+                        }
+                except Exception:
+                    pass
+
+    result = {
+        "current_session": current,
+        "week": {"cost_usd": round(week["cost_usd"], 4), "session_count": week["session_count"]},
+        "month": {"cost_usd": round(month["cost_usd"], 4), "session_count": month["session_count"]},
+    }
+    print(json.dumps(result, indent=2))
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-        print("Usage: ghost_mcp.py tools | call <tool_name> [key=value ...] | quota")
+        print("Usage: ghost_mcp.py tools | call <tool_name> [key=value ...] | quota | cost")
         sys.exit(0)
 
     cmd = sys.argv[1]
@@ -299,6 +404,8 @@ if __name__ == "__main__":
         call_tool(sys.argv[2], _parse_kwargs(sys.argv[3:]))
     elif cmd == "quota":
         quota_direct()
+    elif cmd == "cost":
+        cost_direct()
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
