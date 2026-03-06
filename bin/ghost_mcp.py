@@ -93,7 +93,7 @@ def _parse_kwargs(args):
             print(f"Error: argument '{a}' must be key=value", file=sys.stderr)
             sys.exit(1)
         k, v = a.split("=", 1)
-        if v.isdigit():
+        if v.isdigit() and len(v) < 10:
             v = int(v)
         elif v.lower() in ("true", "false"):
             v = v.lower() == "true"
