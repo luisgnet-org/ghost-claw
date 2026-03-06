@@ -30,26 +30,37 @@ from pathlib import Path
 # CONFIG — all overridable via environment variables
 # ---------------------------------------------------------------------------
 
+# Workspace root: parent of the bin/ directory containing this script
 _SCRIPT_DIR = Path(__file__).resolve().parent
 WORKSPACE = Path(os.environ.get("GHOST_WORKSPACE", str(_SCRIPT_DIR.parent)))
 
-
+# Sessions directory: where Claude Code writes .jsonl session files.
+# Auto-detection looks for a single project directory under ~/.claude/projects/
+# that matches the workspace path slug. Override with GHOST_SESSIONS_DIR.
 def _detect_sessions_dir():
     override = os.environ.get("GHOST_SESSIONS_DIR", "")
     if override:
         return Path(override)
 
+    # Claude Code converts the project path to a slug like
+    # -Users-alice-myproject and stores sessions under
+    # ~/.claude/projects/<slug>/
+    # Try to locate it from the real home first, then the sandbox home.
     candidate_homes = []
 
+    # Real home
     real_home = Path.home()
     candidate_homes.append(real_home / ".claude" / "projects")
 
+    # Sandbox home: one level up from workspace, then home/
     sandbox_home = WORKSPACE.parent / "home"
     if sandbox_home.exists():
         candidate_homes.append(sandbox_home / ".claude" / "projects")
 
+    # Also try the workspace parent itself as a home root
     candidate_homes.append(WORKSPACE.parent / ".claude" / "projects")
 
+    # Build the expected slug from the workspace path
     slug = str(WORKSPACE).replace("/", "-").lstrip("-")
 
     for base in candidate_homes:
@@ -57,10 +68,12 @@ def _detect_sessions_dir():
         if candidate.exists():
             return candidate
 
+    # Fall back to the first existing projects/ directory
     for base in candidate_homes:
         if base.exists():
             children = [c for c in base.iterdir() if c.is_dir()]
             if children:
+                # Pick the one whose jsonl files are most recently modified
                 def latest_mtime(d):
                     files = list(d.glob("*.jsonl"))
                     return max((f.stat().st_mtime for f in files), default=0)
@@ -74,6 +87,8 @@ SESSIONS_DIR = _detect_sessions_dir()
 HANDOFF_PATH = WORKSPACE / "HANDOFF.md"
 PT = timezone(timedelta(hours=-8))
 
+# Operator username: used to match hook-injected messages like [username] text.
+# Set GHOST_OPERATOR_USERNAME to pin it; otherwise auto-detected at runtime.
 OPERATOR_USERNAME = os.environ.get("GHOST_OPERATOR_USERNAME", "").strip()
 
 # ---------------------------------------------------------------------------
@@ -98,10 +113,14 @@ def find_sessions(exclude_id=None):
 # ---------------------------------------------------------------------------
 
 def extract_tail(jsonl_path, max_exchanges=15):
-    """Extract the last N human/assistant exchanges from a session."""
+    """Extract the last N human/assistant exchanges from a session.
+
+    Returns list of dicts: {role, text, topic?}
+    role is either "operator" or "agent".
+    """
     messages = []
     last_topic = None
-    detected_username = OPERATOR_USERNAME
+    detected_username = OPERATOR_USERNAME  # may be filled in during scan
 
     with open(jsonl_path) as f:
         for line in f:
@@ -112,22 +131,27 @@ def extract_tail(jsonl_path, max_exchanges=15):
 
             entry_type = entry.get("type")
 
+            # Handle both old format (human/user) and new (user)
             if entry_type in ("human", "user"):
                 msg = entry.get("message", {})
                 content = msg.get("content", "")
                 texts = _extract_texts(content)
 
                 for text in texts:
+                    # Always try to extract topic from any text block
                     topic = _extract_topic(text)
                     if topic:
                         last_topic = topic
 
+                    # Skip system-reminder blocks for message extraction
                     if "<system-reminder>" in text[:30]:
                         continue
 
+                    # Auto-detect operator username if not configured
                     if not detected_username:
                         detected_username = _detect_operator_username(text)
 
+                    # Check for operator messages
                     op_msg = _extract_operator_message(text, detected_username)
                     if op_msg:
                         messages.append({
@@ -140,6 +164,8 @@ def extract_tail(jsonl_path, max_exchanges=15):
                 msg = entry.get("message", {})
                 content = msg.get("content", "")
 
+                # Priority: extract Telegram send_message calls — these are
+                # what the agent actually said to the operator (high signal).
                 telegram_texts = _extract_telegram_sends(content)
                 if telegram_texts:
                     for tg_text in telegram_texts:
@@ -150,6 +176,9 @@ def extract_tail(jsonl_path, max_exchanges=15):
                             ),
                             "telegram": True,
                         })
+                # No fallback for non-Telegram messages — internal
+                # monologue is noise. The session close summary (last
+                # assistant text) gets captured separately below.
 
     # Deduplicate consecutive messages with identical text
     deduped = []
@@ -162,12 +191,16 @@ def extract_tail(jsonl_path, max_exchanges=15):
         deduped.append(m)
     messages = deduped
 
+    # Always keep ALL operator messages (they're rare and critical).
+    # Fill remaining slots with the most recent agent messages.
     op_msgs = [m for m in messages if m["role"] == "operator"]
     agent_msgs = [m for m in messages if m["role"] == "agent"]
 
+    # Budget: all operator messages + as many agent messages as fit
     agent_budget = max(0, max_exchanges - len(op_msgs))
     agent_tail = agent_msgs[-agent_budget:] if agent_budget else []
 
+    # Rebuild in chronological order
     op_set = set(id(m) for m in op_msgs)
     agent_set = set(id(m) for m in agent_tail)
     tail = [m for m in messages if id(m) in op_set or id(m) in agent_set]
@@ -176,10 +209,15 @@ def extract_tail(jsonl_path, max_exchanges=15):
 
 
 def _detect_operator_username(text):
-    """Auto-detect the operator username from hook injection text."""
+    """Attempt to auto-detect the operator username from hook injection text.
+
+    Hook injection format: [username] message
+    or: NEW MESSAGE FROM username in topic=X
+    """
     match = re.search(r'\[([a-zA-Z0-9_]+)\]\s+\S', text)
     if match:
         candidate = match.group(1)
+        # Exclude known non-operator tokens
         if candidate.lower() not in ("system", "tool", "assistant", "user"):
             return candidate
 
@@ -191,13 +229,19 @@ def _detect_operator_username(text):
 
 
 def _extract_operator_message(text, username):
-    """Extract the operator's actual message from hook injection or user prompt."""
+    """Extract the operator's actual message from hook injection or user prompt.
+
+    Supports two known hook injection formats. If username is empty or None,
+    falls back to generic bracket pattern detection.
+    """
     if username:
+        # Format: [username] message text
         pattern = r'\[' + re.escape(username) + r'\]\s*(.+?)(?=\nRespond to these|\Z)'
         match = re.search(pattern, text, re.DOTALL)
         if match:
             return match.group(1).strip()
 
+        # Format: NEW MESSAGE FROM username in topic=X (msg_id=Y): message
         pattern2 = (
             r'NEW MESSAGE FROM ' + re.escape(username)
             + r'[^:]*:\s*(.+?)(?=\\n\\n\s*$|\Z)'
@@ -207,6 +251,7 @@ def _extract_operator_message(text, username):
             return match.group(1).strip().replace('\\n', '\n')
 
     else:
+        # Generic fallback: any [word] prefix that looks like a username
         match = re.search(
             r'\[([a-zA-Z0-9_]+)\]\s*(.+?)(?=\nRespond to these|\Z)',
             text, re.DOTALL
@@ -220,7 +265,10 @@ def _extract_operator_message(text, username):
 
 
 def _extract_telegram_sends(content):
-    """Extract text from Telegram send_message tool calls."""
+    """Extract text from Telegram send_message tool calls.
+
+    These are what the agent actually said to the operator — highest signal.
+    """
     texts = []
     if not isinstance(content, list):
         return texts
@@ -248,9 +296,11 @@ def _extract_texts(content):
                 text = block["text"].strip()
                 if not text:
                     continue
+                # Include system-reminder blocks that have topic info
+                # (needed for topic extraction) but mark them
                 if "<system-reminder>" in text[:30]:
                     if "topic=" in text:
-                        texts.append(text)
+                        texts.append(text)  # keep for topic extraction
                 else:
                     texts.append(text)
     elif isinstance(content, str) and content.strip():
@@ -260,9 +310,11 @@ def _extract_texts(content):
 
 def _extract_topic(text):
     """Extract topic from hook injection or system-reminder."""
+    # Hook injection: topic=CLAW or topic=CLAW EXODUS
     match = re.search(r'topic=([A-Z][A-Z ]*?)[\s(,\\]', text)
     if match:
         return match.group(1).strip()
+    # Also check system-reminder format
     match = re.search(r'topic=([A-Z][A-Z ]+)', text)
     if match:
         return match.group(1).strip()
@@ -283,11 +335,14 @@ def _get_latest_journal_entry():
     except OSError:
         return None
 
+    # Find all ## headers and extract the first one's content
     sections = re.split(r'^## ', text, flags=re.MULTILINE)
     if len(sections) < 2:
         return None
 
+    # sections[1] is the first ## section (after the split)
     first_section = "## " + sections[1]
+    # Trim to reasonable size
     if len(first_section) > 1000:
         first_section = first_section[:1000] + "..."
     return first_section.strip()
@@ -301,6 +356,7 @@ def format_output(session_path, tail, topic, age_minutes, journal_summary=None):
     """Format the boot context output."""
     lines = []
 
+    # Header with timing
     if age_minutes < 5:
         freshness = "just now"
     elif age_minutes < 60:
@@ -316,6 +372,7 @@ def format_output(session_path, tail, topic, age_minutes, journal_summary=None):
         lines.append(f"Topic: {topic}")
     lines.append("")
 
+    # Conversation tail
     if not tail:
         lines.append("(No messages extracted)")
     else:
@@ -326,11 +383,13 @@ def format_output(session_path, tail, topic, age_minutes, journal_summary=None):
                 lines.append(f"**AGENT:** {msg['text']}")
             lines.append("")
 
+    # Journal summary (high-signal human-written context)
     if journal_summary:
         lines.append("### Latest Journal Entry")
         lines.append(journal_summary)
         lines.append("")
 
+    # Guidance based on recency
     lines.append("---")
     if age_minutes < 10:
         lines.append("Recency: VERY RECENT — continue the conversation directly.")
@@ -381,21 +440,26 @@ def main():
         print(f"No prior sessions found in {SESSIONS_DIR}")
         return
 
+    # Use the most recent session
     session_path, mtime = sessions[0]
     age_minutes = (datetime.now().timestamp() - mtime) / 60
 
+    # Extract the tail
     tail, topic = extract_tail(session_path, max_exchanges=max_messages)
 
+    # Try to find the most recent journal entry as supplemental context
     journal_summary = _get_latest_journal_entry()
 
+    # Format and print
     output = format_output(session_path, tail, topic, age_minutes,
                            journal_summary=journal_summary)
     print(output)
 
+    # Also write to HANDOFF.md for fast file reads
     try:
         HANDOFF_PATH.write_text(output + "\n")
     except OSError:
-        pass
+        pass  # Non-critical
 
 
 if __name__ == "__main__":

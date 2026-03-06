@@ -1,0 +1,67 @@
+(version 1)
+
+;; ghost-claw sandbox profile — deny-default
+;;
+;; Unrestricted reads (required — path-filtered reads break Node.js).
+;; Restricted writes to specific paths.
+;; Paths use PARAM_ placeholders — sed-replace before use.
+
+(deny default)
+
+;; ---- Process ----
+(allow process-exec*)
+(allow process-fork)
+(allow signal)
+
+;; ---- macOS IPC ----
+(allow mach-lookup)
+(allow mach-register)
+(allow ipc-posix-shm-read-data)
+(allow ipc-posix-shm-write-data)
+(allow ipc-posix-shm-write-create)
+(allow sysctl-read)
+(allow sysctl-write)
+(allow iokit-open)
+
+;; ---- Network ----
+(allow network*)
+
+;; ---- File reads (unrestricted) ----
+(allow file-read*)
+(allow file-map-executable)
+(allow file-ioctl)
+
+;; ---- File writes (restricted) ----
+(allow file-write*
+    (subpath "/dev")
+    (subpath "/tmp")
+    (subpath "/private/tmp")
+    (subpath "/var/folders")
+    (subpath "/private/var/folders"))
+
+;; Claude Code state
+(allow file-write*
+    (subpath "PARAM_HOME/.claude")
+    (regex #"^PARAM_HOME/\.claude\.json")
+    (subpath "PARAM_HOME/.local/state/claude"))
+
+;; Agent workspace + sessions + home
+(allow file-write*
+    (subpath "PARAM_AGENT_DIR/workspace")
+    (subpath "PARAM_AGENT_DIR/sessions")
+    (subpath "PARAM_AGENT_DIR/home"))
+
+;; Ghost runtime
+(allow file-write*
+    (subpath "PARAM_GHOST_HOME/ghost_run_dir"))
+
+;; Ghost source repos (if writing back to daemon code)
+(allow file-write*
+    (subpath "PARAM_GHOST_HOME/git"))
+
+;; ---- Deny sensitive paths (ORDER MATTERS: deny AFTER allow) ----
+(deny file-read* file-write*
+    (subpath "PARAM_HOME/.ssh"))
+(deny file-read* file-write*
+    (literal "PARAM_GHOST_HOME/git/ghost/.env")
+    (regex #"^PARAM_GHOST_HOME/git/ghost/\.env\."))

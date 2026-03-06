@@ -1,8 +1,10 @@
 # Secrets
 secrets/
 
-# Runtime state
-.claude/
+# Runtime state (keep hooks + settings for distribution)
+.claude/*
+!.claude/hooks/
+!.claude/settings.json
 .mcp.json
 inbox/
 *.pid

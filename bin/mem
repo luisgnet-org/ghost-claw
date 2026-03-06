@@ -47,7 +47,7 @@ from pathlib import Path
 # MEM_USER_LABEL       — display label for the operator/user in session output
 # MEM_AGENT_LABEL      — display label for the agent in session output
 # MEM_USER_PATTERN     — regex pattern matching the user's handle in injected
-#                        message prefixes, e.g. r'\[operator\]' or r'\[operator\]'
+#                        message prefixes, e.g. r'\[luisgnet\]' or r'\[operator\]'
 #                        Set to empty string to disable prefix stripping.
 # MEM_WORKSPACE_DIR    — workspace root (used in help text for the `ask` command)
 
@@ -58,10 +58,29 @@ _WORKSPACE_DIR = Path(os.environ.get(
     str(_SCRIPT_DIR.parent)  # one level up from bin/
 ))
 
-SESSIONS_DIR = Path(os.environ.get(
-    "MEM_SESSIONS_DIR",
-    os.path.expanduser("~/.claude/projects/default-workspace")
-))
+def _detect_sessions_dir():
+    """Auto-detect sessions directory from workspace path."""
+    override = os.environ.get("MEM_SESSIONS_DIR", "")
+    if override:
+        return Path(override)
+    # Try slug-based detection under ~/.claude/projects/
+    slug = str(_WORKSPACE_DIR).replace("/", "-").lstrip("-")
+    candidate = _HOME / ".claude" / "projects" / slug
+    if candidate.exists():
+        return candidate
+    # Try sandbox home (one level up from workspace, then home/)
+    sandbox_home = _WORKSPACE_DIR.parent / "home"
+    if sandbox_home.exists():
+        candidate = sandbox_home / ".claude" / "projects" / slug
+        if candidate.exists():
+            return candidate
+    # Fall back to agent-level sessions/ directory
+    agent_sessions = _WORKSPACE_DIR.parent / "sessions"
+    if agent_sessions.exists():
+        return agent_sessions
+    return _HOME / ".claude" / "projects"
+
+SESSIONS_DIR = _detect_sessions_dir()
 
 # CLI sessions extracted by daemon workflows (claude_session_sync, opencode_session_sync).
 # Set to an empty string or non-existent path to disable CLI session search.
@@ -81,13 +100,13 @@ CACHE_DIR = Path(os.environ.get(
 ))
 
 # Display labels for roles in output
-USER_LABEL = os.environ.get("MEM_USER_LABEL", "USER")
-AGENT_LABEL = os.environ.get("MEM_AGENT_LABEL", "AGENT")
+USER_LABEL = os.environ.get("MEM_USER_LABEL", "User")
+AGENT_LABEL = os.environ.get("MEM_AGENT_LABEL", "Agent")
 
 # Regex pattern that matches the user's handle as injected into messages by the
-# io-bridge hook, e.g. '[operator]' or '[operator]'. Used for boilerplate
+# io-bridge hook, e.g. '[luisgnet]' or '[operator]'. Used for boilerplate
 # stripping and warmup formatting. Set to empty string to disable.
-_USER_PATTERN_RAW = os.environ.get("MEM_USER_PATTERN", r"\[operator\]")
+_USER_PATTERN_RAW = os.environ.get("MEM_USER_PATTERN", "")
 _USER_PATTERN = re.compile(_USER_PATTERN_RAW) if _USER_PATTERN_RAW else None
 
 
@@ -106,7 +125,7 @@ def _build_boilerplate_patterns():
         # Empty "let me" transitions
         re.compile(r'^(?:Let me |Now let me |I\'ll )(?:check|read|look|wait|search).*?\.?\s*$', re.MULTILINE),
     ]
-    # Strip the user's handle prefix from injected messages (e.g. "[operator]")
+    # Strip the user's handle prefix from injected messages (e.g. "[luisgnet]")
     if _USER_PATTERN_RAW:
         patterns.append(
             re.compile(r'^New messages:\s*\n\n' + _USER_PATTERN_RAW + r'\s*', re.MULTILINE)
