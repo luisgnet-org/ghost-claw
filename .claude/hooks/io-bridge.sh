@@ -108,7 +108,7 @@ case "$TOOL_NAME" in
         ;;
 
     # Auto-allow: read-only tools, file tools, web tools, MCP tools, subagents
-    Read|Glob|Grep|WebSearch|WebFetch|Write|Edit|NotebookEdit|TodoRead|TodoWrite|Task|Agent|TaskOutput|TaskStop|AskUserQuestion|Skill|mcp__*)
+    Read|Glob|Grep|WebSearch|WebFetch|Write|Edit|NotebookEdit|TodoRead|TodoWrite|Task|Agent|TaskOutput|TaskStop|AskUserQuestion|Skill|ToolSearch|EnterWorktree|mcp__*)
         ;;
 
     # ALLOW: entering plan mode
