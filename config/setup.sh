@@ -42,6 +42,7 @@ mkdir -p "$AGENT_DIR"/{workspace,sessions,home}
 mkdir -p "$AGENT_DIR/workspace/inbox"
 mkdir -p "$AGENT_DIR/workspace/memory/log"
 mkdir -p "$RUN_DIR/audit"
+mkdir -p "$GHOST_HOME/ghost_run_dir/telegram"
 
 # 2. Symlink or copy the plugin into workspace
 if [ ! -e "$AGENT_DIR/workspace/CLAUDE.md" ]; then
@@ -84,13 +85,38 @@ sed -e "s/PARAM_HOME/$ESCAPED_HOME/g" \
     "$PLUGIN_DIR/config/sandbox.sb" > "$AGENT_DIR/sandbox.sb"
 
 # 5. Install workflow into ghost daemon
-GHOST_WORKFLOWS="$GHOST_HOME/git/ghost/ghost/workflows"
+GHOST_DAEMON="$GHOST_HOME/git/ghost"
+GHOST_WORKFLOWS="$GHOST_DAEMON/ghost/workflows"
+GHOST_CONFIG="$GHOST_DAEMON/config/config.yaml"
+
 if [ -d "$GHOST_WORKFLOWS" ] && [ -f "$PLUGIN_DIR/workflows/claw.py" ]; then
     echo "Installing claw workflow into ghost daemon..."
     cp "$PLUGIN_DIR/workflows/claw.py" "$GHOST_WORKFLOWS/claw.py"
 else
     echo "NOTE: Could not find ghost daemon at $GHOST_WORKFLOWS"
     echo "      Copy workflows/claw.py into your ghost/workflows/ directory manually."
+fi
+
+# 5b. Add claw job to config.yaml if not already present
+if [ -f "$GHOST_CONFIG" ] && ! grep -q "name: $AGENT_NAME" "$GHOST_CONFIG"; then
+    echo "Adding claw job to config.yaml..."
+    cat >> "$GHOST_CONFIG" << YAML
+
+  # claw — autonomous agent (added by ghost-claw setup)
+  - name: $AGENT_NAME
+    schedule: "every 5s"
+    workflow: claw
+    run_while_sleeping: true
+    enabled: true
+    config:
+      default_topic: "${AGENT_NAME^^}"
+      agent_dir: "$AGENT_DIR"
+YAML
+    echo "  Added $AGENT_NAME job to $GHOST_CONFIG"
+else
+    if grep -q "name: $AGENT_NAME" "$GHOST_CONFIG" 2>/dev/null; then
+        echo "  $AGENT_NAME job already exists in config.yaml"
+    fi
 fi
 
 # 6. Make bin/ scripts executable
@@ -118,15 +144,8 @@ echo "=== Setup complete ==="
 echo ""
 echo "Next steps:"
 echo "  1. Make sure the ghost daemon is configured (.env with bot token + API key)"
-echo "  2. Add claw to ghost's config/config.yaml:"
-echo "       jobs:"
-echo "         - name: claw"
-echo "           schedule: \"every 5s\""
-echo "           workflow: claw"
-echo "           run_while_sleeping: true"
-echo "           enabled: true"
-echo "  3. Start the daemon: ghost/bin/start.sh"
-echo "  4. Send a message to your Telegram bot — the agent wakes up"
+echo "  2. Start the daemon: $GHOST_DAEMON/ghost/bin/start.sh"
+echo "  3. Send a message to your Telegram bot — the agent wakes up"
 echo ""
 echo "To run Claude Code in the sandbox manually:"
 echo "  sandbox-exec -f $AGENT_DIR/sandbox.sb \\"
