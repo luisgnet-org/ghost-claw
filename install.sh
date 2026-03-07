@@ -544,4 +544,11 @@ echo ""
 
 # ── Live setup checker ────────────────────────────────────────────────────────
 # Runs in watch mode, updating live as the user completes remaining steps.
-exec "$PLUGIN_DIR/bin/setup-check.sh" --home "$GHOST_HOME" --watch
+"$PLUGIN_DIR/bin/setup-check.sh" --home "$GHOST_HOME" --watch || true
+
+# ── Live status monitor ───────────────────────────────────────────────────────
+echo ""
+echo -e "${DIM} Switching to live status monitor... (exit process at any time)${NC}"
+echo ""
+sleep 1
+exec "$VENV/bin/python3" "$PLUGIN_DIR/bin/status.py" --home "$GHOST_HOME"
