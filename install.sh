@@ -2,11 +2,14 @@
 # install.sh — Ghost + Claw one-command installer
 #
 # Usage:
-#   ./install.sh [--home DIR] [--instance-id ID] [--ghost-repo URL]
+#   ./install.sh --home DIR [--instance-id ID] [--ghost-repo URL]
 #                [--no-launchd] [--no-start]
 #
+# Required:
+#   --home DIR     Where to install (e.g. ~/ghost or ~/myagent). Must not exist
+#                  or be empty — will not clobber an existing install.
+#
 # Defaults:
-#   --home ~/ghost
 #   --instance-id  derived from basename of --home
 #   --ghost-repo   https://github.com/luisgnet-org/ghost.git
 #
@@ -24,7 +27,7 @@
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-GHOST_HOME_ARG="$HOME/ghost"
+GHOST_HOME_ARG=""
 GHOST_REPO="https://github.com/luisgnet-org/ghost.git"
 INSTANCE_ID=""
 AGENT_NAME="claw"
@@ -44,6 +47,18 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# --home is required
+if [ -z "$GHOST_HOME_ARG" ]; then
+    echo ""
+    echo "Error: --home DIR is required."
+    echo ""
+    echo "Usage: ./install.sh --home ~/myagent"
+    echo ""
+    echo "Choose a directory that doesn't exist yet (e.g. ~/ghost, ~/myagent)."
+    echo "It must not conflict with an existing ghost install."
+    exit 1
+fi
 
 # Expand ~ manually (works even when not in interactive shell)
 GHOST_HOME="${GHOST_HOME_ARG/#\~/$HOME}"
