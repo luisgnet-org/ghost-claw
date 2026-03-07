@@ -348,9 +348,14 @@ WORKSPACE="$AGENT_DIR/workspace"
 
 [ ! -e "$WORKSPACE/CLAUDE.md" ] && cp "$PLUGIN_DIR/CLAUDE.md" "$WORKSPACE/CLAUDE.md"
 
-for dir in SOUL KNOWLEDGE bin; do
+# bin → symlink (gets repo updates automatically)
+[ -d "$CLAW_GIT/bin" ] && [ ! -e "$WORKSPACE/bin" ] && \
+    ln -s "../../../git/ghost_claw/bin" "$WORKSPACE/bin"
+
+# SOUL and KNOWLEDGE → local copies (agent owns these, they evolve per-instance)
+for dir in SOUL KNOWLEDGE; do
     [ -d "$CLAW_GIT/$dir" ] && [ ! -e "$WORKSPACE/$dir" ] && \
-        ln -s "../../../git/ghost_claw/$dir" "$WORKSPACE/$dir"
+        cp -r "$CLAW_GIT/$dir" "$WORKSPACE/$dir"
 done
 for file in HEARTBEAT.md CRON.md; do
     [ -f "$PLUGIN_DIR/$file" ] && [ ! -e "$WORKSPACE/$file" ] && \
