@@ -478,18 +478,7 @@ echo "   Stop:      launchctl unload $LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
 echo "   Start:     launchctl load   $LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
 echo "   Uninstall: $(dirname "$0")/uninstall.sh --home $GHOST_HOME"
 echo ""
-hr
-echo -e "${BOLD} Next steps${NC}"
-hr
-echo ""
-echo -e " ${BOLD}1. Log into Claude Code${NC} (required before the agent can run)"
-echo ""
-echo "      HOME=$AGENT_DIR/home claude"
-echo ""
-echo "   This opens Claude Code in an isolated home directory."
-echo "   Log in once — credentials persist for future sessions."
-echo ""
-echo -e " ${BOLD}2. Send a message${NC} to your Telegram bot."
-echo ""
-echo "   The agent will wake up and reply."
-echo ""
+
+# ── Live setup checker ────────────────────────────────────────────────────────
+# Runs in a loop, updating in-place as the user completes remaining steps.
+exec "$PLUGIN_DIR/bin/setup-check.sh" --home "$GHOST_HOME"
