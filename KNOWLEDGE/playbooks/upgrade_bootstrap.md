@@ -70,7 +70,7 @@ Compare each SOUL file in the live workspace against the bootstrap version.
 
 ## Step 2 — Audit KNOWLEDGE files
 
-### builder_lenses.md
+### lenses.md
 - Framework summaries (PG, Levels, Jobs, Musk, West) are general purpose.
   Copy the full file, replacing any operator-specific examples.
 - Do NOT include copyrighted source material (full book texts, essay

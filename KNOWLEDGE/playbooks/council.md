@@ -21,11 +21,11 @@ NOT for: tactical decisions, implementation choices, quick yes/no calls.
 ### Muses (3) — propose directions
 
 Each argues from a specific worldview with extracted source material loaded.
-Populate from `KNOWLEDGE/builder_lenses.md` — the operator's chosen influences.
+Populate from `KNOWLEDGE/lenses.md` — the operator's chosen influences.
 
 | Slot | Role | Source |
 |---|---|---|
-| Muse 1 | First lens from builder_lenses.md | `sources/<name>_extracted.md` |
+| Muse 1 | First lens from lenses.md | `sources/<name>_extracted.md` |
 | Muse 2 | Second lens | `sources/<name>_extracted.md` |
 | Muse 3 | Third lens | `sources/<name>_extracted.md` |
 
