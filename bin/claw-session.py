@@ -626,12 +626,23 @@ def main():
         (WORKSPACE / "WRAP_UP_ACK.md").unlink(missing_ok=True)
 
         quota_after = fetch_quota()
-        api_report(
-            exit_info,
-            str(session_dir),
-            quota_before,
-            quota_after,
-            session_label=short_id,
+
+        # Build human-readable exit message for SESSIONS topic
+        code = session_proc.returncode if session_proc else None
+        exit_descriptions = {
+            0:   "clean exit",
+            1:   "error (check if Claude is authenticated)",
+            130: "interrupted (SIGINT)",
+            137: "killed (SIGKILL)",
+            143: "stopped (SIGTERM)",
+        }
+        exit_label = exit_descriptions.get(code, f"exit {code}")
+        quota_str = ""
+        if quota_before is not None and quota_after is not None:
+            used = round((quota_after or 0) - (quota_before or 0), 1)
+            quota_str = f"  quota {quota_after}%" if quota_after is not None else ""
+        api_notify(
+            f"\U0001f534 done [{short_id}]  {exit_label}{quota_str}",
             topic_name="SESSIONS",
         )
         api_set_all_sleeping()
