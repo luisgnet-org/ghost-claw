@@ -116,18 +116,18 @@ try:
         print('notadmin')
         sys.exit(0)
     perms = [
-        ('can_manage_chat',        True,  'Manage chat'),
-        ('can_manage_topics',      True,  'Manage topics'),
-        ('can_change_info',        False, 'Change group info'),
-        ('can_delete_messages',    False, 'Delete messages'),
-        ('can_invite_users',       False, 'Invite users'),
-        ('can_manage_video_chats', False, 'Manage video chats'),
-        ('can_pin_messages',       False, 'Pin messages'),
-        ('can_post_stories',       False, 'Post stories'),
-        ('can_edit_stories',       False, 'Edit stories'),
-        ('can_delete_stories',     False, 'Delete stories'),
-        ('can_promote_members',    False, 'Add admins'),
-        ('can_restrict_members',   False, 'Restrict members'),
+        ('can_change_info',        False, 'Change Group Info'),
+        ('can_delete_messages',    True,  'Delete Messages'),
+        ('can_post_stories',       False, 'Post Stories'),
+        ('can_edit_stories',       False, 'Edit Stories of Others'),
+        ('can_delete_stories',     False, 'Delete Stories of Others'),
+        ('can_restrict_members',   False, 'Ban Users'),
+        ('can_invite_users',       True,  'Add Users'),
+        ('can_pin_messages',       True,  'Pin Messages'),
+        ('can_promote_members',    False, 'Add New Admins'),
+        ('can_manage_video_chats', False, 'Manage Video Chats'),
+        ('can_manage_topics',      True,  'Manage Topics'),
+        ('is_anonymous',           False, 'Remain Anonymous'),
     ]
     for key, must_on, label in perms:
         actual = bool(bot.get(key, False))
