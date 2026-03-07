@@ -6,16 +6,18 @@ Shows live health of the entire pipeline:
   services → telegram → inbox → session → replies
 
 Usage:
-  bin/status.py                    # loop, refresh every 3s
-  bin/status.py --once             # print once and exit
-  bin/status.py --home ~/myghost  # explicit GHOST_HOME
+  bin/status.py                    # print once and exit
+  bin/status.py --watch            # ncurses TUI, refresh every 3s
+  bin/status.py --home ~/myghost   # explicit GHOST_HOME
 """
 
 from __future__ import annotations
 
 import argparse
+import curses
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -27,23 +29,20 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).parent
 _GHOST_HOME_DEFAULT = _SCRIPT_DIR.parent.parent.parent  # bin/ → ghost_claw/ → git/ → GHOST_HOME/
 
-# ── ANSI colours ──────────────────────────────────────────────────────────────
+# ── ANSI colours (for non-curses output) ─────────────────────────────────────
 GREEN  = "\033[0;32m"
 RED    = "\033[0;31m"
 YELLOW = "\033[1;33m"
-CYAN   = "\033[0;36m"
 BOLD   = "\033[1m"
 DIM    = "\033[2m"
 NC     = "\033[0m"
 
-OK   = f"{GREEN}✓{NC}"
-FAIL = f"{RED}✗{NC}"
-WARN = f"{YELLOW}~{NC}"
-WAIT = f"{YELLOW}○{NC}"
+_ANSI_ICONS = {"ok": f"{GREEN}✓{NC}", "fail": f"{RED}✗{NC}", "warn": f"{YELLOW}~{NC}",
+               "wait": f"{YELLOW}○{NC}", "blank": "  "}
+_CURSES_ICONS = {"ok": "✓", "fail": "✗", "warn": "~", "wait": "○", "blank": " "}
 
 
 def _ago(ts: float | None) -> str:
-    """Human-readable time since ts (unix or isoformat)."""
     if ts is None:
         return "never"
     if isinstance(ts, str):
@@ -65,12 +64,9 @@ def _ago(ts: float | None) -> str:
 
 
 def _launchctl_status(label: str) -> tuple[str, int | None, int | None]:
-    """Returns (state, pid, exit_code). state: 'running'|'stopped'|'unknown'."""
     try:
-        r = subprocess.run(
-            ["launchctl", "list", label],
-            capture_output=True, text=True, timeout=3,
-        )
+        r = subprocess.run(["launchctl", "list", label],
+                           capture_output=True, text=True, timeout=3)
         if r.returncode != 0:
             return "stopped", None, None
         data = {}
@@ -81,8 +77,7 @@ def _launchctl_status(label: str) -> tuple[str, int | None, int | None]:
                 data[k.strip().strip('"')] = v.strip().strip('"')
         pid = int(data["PID"]) if data.get("PID", "0") not in ("0", "") else None
         exit_code = int(data.get("LastExitStatus", "0") or "0")
-        state = "running" if pid else "stopped"
-        return state, pid, exit_code
+        return ("running" if pid else "stopped"), pid, exit_code
     except Exception:
         return "unknown", None, None
 
@@ -95,34 +90,33 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def build_status(ghost_home: Path) -> list[str]:
-    lines: list[str] = []
+# ── Status data ──────────────────────────────────────────────────────────────
+# Each row: (icon_type, label, value, note)
+# icon_type: 'ok' | 'fail' | 'warn' | 'wait' | 'blank' | 'header'
+
+def build_status(ghost_home: Path) -> list[tuple[str, str, str, str]]:
+    rows: list[tuple[str, str, str, str]] = []
     label_prefix = f"com.ghost.{ghost_home.name}"
 
     def h(title: str):
-        lines.append(f"\n {BOLD}{title}{NC}")
-        lines.append(f" {'─' * 52}")
+        rows.append(("header", title, "", ""))
 
     def row(icon: str, label: str, value: str = "", note: str = ""):
-        label_col = f"{label:<28}"
-        val_col   = f"{value:<18}"
-        note_col  = f"{DIM}{note}{NC}" if note else ""
-        lines.append(f"  {icon}  {label_col}{val_col}{note_col}")
+        rows.append((icon, label, value, note))
 
-    # ── 1. Services ───────────────────────────────────────────────────────────
+    # ── 1. Services ──────────────────────────────────────────────────────────
     h("Services")
     for svc in ("daemon", "mcp-proxy", "claw-session"):
         label = f"{label_prefix}.{svc}"
         state, pid, exit_code = _launchctl_status(label)
         if state == "running":
-            row(OK, svc, "running", f"pid {pid}")
+            row("ok", svc, "running", f"pid {pid}")
         elif state == "stopped":
             note = f"exit {exit_code}" if exit_code else "not running"
-            row(FAIL if svc != "claw-session" else WAIT, svc, "stopped", note)
+            row("fail" if svc != "claw-session" else "wait", svc, "stopped", note)
         else:
-            row(WARN, svc, "unknown", "launchctl lookup failed")
+            row("warn", svc, "unknown", "launchctl lookup failed")
 
-    # MCP server (check port directly)
     mcp_port_path = ghost_home / ".env"
     mcp_port = 7870
     if mcp_port_path.exists():
@@ -135,19 +129,16 @@ def build_status(ghost_home: Path) -> list[str]:
     mcp_ok = False
     for host in ("127.0.0.1", "::1", "localhost"):
         try:
-            import socket
             s = socket.create_connection((host, mcp_port), timeout=0.5)
             s.close()
             mcp_ok = True
             break
         except Exception:
             pass
-    if mcp_ok:
-        row(OK, "MCP server", "listening", f"port {mcp_port}")
-    else:
-        row(FAIL, "MCP server", "not reachable", f"port {mcp_port}")
+    row("ok" if mcp_ok else "fail", "MCP server",
+        "listening" if mcp_ok else "not reachable", f"port {mcp_port}")
 
-    # ── 2. Daemon ─────────────────────────────────────────────────────────────
+    # ── 2. Daemon ────────────────────────────────────────────────────────────
     h("Daemon")
     state_path = ghost_home / "ghost_run_dir" / "state.json"
     state: dict = {}
@@ -157,27 +148,26 @@ def build_status(ghost_home: Path) -> list[str]:
         except Exception:
             pass
 
-    last_run_map = state.get("last_run", {})
-    claw_last = last_run_map.get("claw")
+    claw_last = state.get("last_run", {}).get("claw")
     if claw_last:
-        row(OK, "Claw workflow last run", "", _ago(claw_last))
+        row("ok", "Claw workflow last run", "", _ago(claw_last))
     else:
-        row(FAIL, "Claw workflow", "never run", "check daemon + config.yaml")
+        row("fail", "Claw workflow", "never run", "check daemon + config.yaml")
 
     log_path = ghost_home / "ghost_run_dir" / "ghost.log"
     if log_path.exists():
         mtime = log_path.stat().st_mtime
         age_s = time.time() - mtime
-        icon = OK if age_s < 30 else (WARN if age_s < 120 else FAIL)
+        icon = "ok" if age_s < 30 else ("warn" if age_s < 120 else "fail")
         row(icon, "Daemon log activity", "", _ago(mtime))
     else:
-        row(FAIL, "Daemon log", "not found", str(log_path))
+        row("fail", "Daemon log", "not found", str(log_path))
 
-    # ── 3. Telegram DB ────────────────────────────────────────────────────────
+    # ── 3. Telegram DB ───────────────────────────────────────────────────────
     h("Telegram")
     db_path = ghost_home / "ghost_run_dir" / "telegram" / "telegram.db"
     db_ok = False
-    topics_map: dict[int, str] = {}  # topic_id → name
+    topics_map: dict[int, str] = {}
     last_user_msg_ts: float | None = None
     last_user_msg_text: str = ""
     total_events = 0
@@ -188,61 +178,44 @@ def build_status(ghost_home: Path) -> list[str]:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-
             cur.execute("SELECT COUNT(*) FROM events")
             total_events = cur.fetchone()[0]
-
             cur.execute("SELECT topic_id, topic_name FROM topics ORDER BY last_used DESC")
             for r in cur.fetchall():
                 topics_map[r["topic_id"]] = r["topic_name"]
-
-            # Find bot user id (most frequent sender with is_bot heuristic)
-            cur.execute("""
-                SELECT user_id, user_name, COUNT(*) as cnt FROM events
-                WHERE event_type='message' AND text=''
-                GROUP BY user_id ORDER BY cnt DESC LIMIT 1
-            """)
+            cur.execute("""SELECT user_id, user_name, COUNT(*) as cnt FROM events
+                WHERE event_type='message' AND text='' GROUP BY user_id ORDER BY cnt DESC LIMIT 1""")
             r = cur.fetchone()
             if r:
                 bot_user_id = r["user_id"]
-
-            # Last non-bot message
             if bot_user_id:
-                cur.execute("""
-                    SELECT text, timestamp FROM events
+                cur.execute("""SELECT text, timestamp FROM events
                     WHERE event_type='message' AND user_id != ? AND text != ''
-                    ORDER BY update_id DESC LIMIT 1
-                """, (bot_user_id,))
+                    ORDER BY update_id DESC LIMIT 1""", (bot_user_id,))
             else:
-                cur.execute("""
-                    SELECT text, timestamp FROM events
+                cur.execute("""SELECT text, timestamp FROM events
                     WHERE event_type='message' AND text != ''
-                    ORDER BY update_id DESC LIMIT 1
-                """)
+                    ORDER BY update_id DESC LIMIT 1""")
             r = cur.fetchone()
             if r:
                 last_user_msg_ts = r["timestamp"]
                 last_user_msg_text = (r["text"] or "")[:40]
-
             conn.close()
             db_ok = True
         except Exception as e:
-            row(FAIL, "Telegram DB", "error", str(e)[:40])
+            row("fail", "Telegram DB", "error", str(e)[:40])
 
     if db_ok:
-        row(OK, "Telegram DB", f"{total_events} events", f"last user msg {_ago(last_user_msg_ts)}")
+        row("ok", "Telegram DB", f"{total_events} events", f"last user msg {_ago(last_user_msg_ts)}")
         if last_user_msg_text:
-            row("  ", "Last message", "", f'"{last_user_msg_text}"')
-        if topics_map:
-            for tid, tname in list(topics_map.items())[:4]:
-                row("  ", f"Topic '{tname}'", f"id={tid}", "")
+            row("blank", "Last message", "", f'"{last_user_msg_text}"')
+        for tid, tname in list(topics_map.items())[:4]:
+            row("blank", f"Topic '{tname}'", f"id={tid}", "")
     else:
-        row(FAIL, "Telegram DB", "not found", str(db_path))
+        row("fail", "Telegram DB", "not found", str(db_path))
 
-    # ── 4. Claw pipeline ──────────────────────────────────────────────────────
+    # ── 4. Claw pipeline ─────────────────────────────────────────────────────
     h("Claw Pipeline")
-
-    # Cursors vs DB
     shared = state.get("shared", {})
     cursors: dict = shared.get("claw_topic_cursors", {}) or {}
 
@@ -252,37 +225,28 @@ def build_status(ghost_home: Path) -> list[str]:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             for topic_name, cursor_uid in cursors.items():
-                # Find topic_id for this name
                 tid = next((k for k, v in topics_map.items() if v == topic_name), None)
                 if tid is None:
-                    row(WARN, f"Cursor '{topic_name}'", "topic id unknown", f"@{cursor_uid}")
+                    row("warn", f"Cursor '{topic_name}'", "topic id unknown", f"@{cursor_uid}")
                     continue
-                # Count unread user messages
                 if bot_user_id:
-                    cur.execute("""
-                        SELECT COUNT(*) FROM events
-                        WHERE topic_id=? AND event_type='message'
-                        AND user_id != ? AND text != ''
-                        AND update_id > ?
-                    """, (tid, bot_user_id, cursor_uid))
+                    cur.execute("""SELECT COUNT(*) FROM events WHERE topic_id=? AND event_type='message'
+                        AND user_id != ? AND text != '' AND update_id > ?""",
+                        (tid, bot_user_id, cursor_uid))
                 else:
-                    cur.execute("""
-                        SELECT COUNT(*) FROM events
-                        WHERE topic_id=? AND event_type='message'
-                        AND text != '' AND update_id > ?
-                    """, (tid, cursor_uid))
+                    cur.execute("""SELECT COUNT(*) FROM events WHERE topic_id=? AND event_type='message'
+                        AND text != '' AND update_id > ?""", (tid, cursor_uid))
                 unread = cur.fetchone()[0]
                 if unread:
-                    row(WARN, f"Cursor '{topic_name}'", f"{unread} unread", f"cursor @{cursor_uid}")
+                    row("warn", f"Cursor '{topic_name}'", f"{unread} unread", f"cursor @{cursor_uid}")
                 else:
-                    row(OK, f"Cursor '{topic_name}'", "up to date", f"@{cursor_uid}")
+                    row("ok", f"Cursor '{topic_name}'", "up to date", f"@{cursor_uid}")
             conn.close()
         except Exception as e:
-            row(WARN, "Cursor check", "error", str(e)[:40])
+            row("warn", "Cursor check", "error", str(e)[:40])
     elif not cursors:
-        row(WAIT, "Cursors", "not initialized", "claw hasn't run yet")
+        row("wait", "Cursors", "not initialized", "claw hasn't run yet")
 
-    # Inbox
     inbox_path = ghost_home / "agents" / "claw" / "workspace" / "inbox"
     pending_msgs = sorted(inbox_path.glob("msg_*.json")) if inbox_path.exists() else []
     pending_hb   = sorted(inbox_path.glob("heartbeat_*.json")) if inbox_path.exists() else []
@@ -294,27 +258,21 @@ def build_status(ghost_home: Path) -> list[str]:
         if pending_msgs:  parts.append(f"{len(pending_msgs)} msg")
         if pending_hb:    parts.append(f"{len(pending_hb)} heartbeat")
         if pending_trig:  parts.append(f"{len(pending_trig)} trigger")
-        oldest = min(
-            (p.stat().st_mtime for p in pending_msgs + pending_hb + pending_trig),
-            default=None
-        )
-        row(WARN, "Inbox", ", ".join(parts), f"oldest {_ago(oldest)}")
+        oldest = min((p.stat().st_mtime for p in pending_msgs + pending_hb + pending_trig), default=None)
+        row("warn", "Inbox", ", ".join(parts), f"oldest {_ago(oldest)}")
         for p in (pending_msgs + pending_hb + pending_trig)[:3]:
             try:
                 d = json.loads(p.read_text())
                 label = d.get("text") or d.get("type") or p.name
-                row("  ", f"  {p.name[:24]}", "", str(label)[:40])
+                row("blank", f"  {p.name[:24]}", "", str(label)[:40])
             except Exception:
-                row("  ", f"  {p.name[:24]}", "", "")
+                row("blank", f"  {p.name[:24]}", "", "")
     else:
         last_end = shared.get("claw_last_session_end")
-        row(OK, "Inbox", "empty", f"last cleared {_ago(last_end)}" if last_end else "")
+        row("ok", "Inbox", "empty", f"last cleared {_ago(last_end)}" if last_end else "")
 
-    # Session
     lockfile = ghost_home / "ghost_run_dir" / "workflows" / "claw" / ".claude.pid"
-    session_log = ghost_home / "ghost_run_dir" / "workflows" / "claw" / "session-launcher.log"
     sessions_dir = ghost_home / "agents" / "claw" / "sessions"
-
     active_pid: int | None = None
     if lockfile.exists():
         try:
@@ -327,102 +285,160 @@ def build_status(ghost_home: Path) -> list[str]:
             pass
 
     if active_pid:
-        # Try to find current session JSONL
         try:
             latest_jsonl = max(sessions_dir.rglob("session_*.jsonl"), key=lambda p: p.stat().st_mtime)
             age_s = time.time() - latest_jsonl.stat().st_mtime
             activity = f"active {_ago(latest_jsonl.stat().st_mtime)}" if age_s < 15 else f"idle {_ago(latest_jsonl.stat().st_mtime)}"
         except Exception:
             activity = "running"
-        row(OK, "Claude session", f"pid {active_pid}", activity)
+        row("ok", "Claude session", f"pid {active_pid}", activity)
     else:
-        # Last session end
         last_end = shared.get("claw_last_session_end")
         if last_end:
-            row(WAIT, "Claude session", "idle", f"last ended {_ago(last_end)}")
+            row("wait", "Claude session", "idle", f"last ended {_ago(last_end)}")
         else:
-            row(WAIT, "Claude session", "idle", "no sessions yet")
+            row("wait", "Claude session", "idle", "no sessions yet")
 
-    # ── 5. Recent messages ────────────────────────────────────────────────────
+    # ── 5. Recent messages ───────────────────────────────────────────────────
     if db_ok and db_path.exists():
         h("Recent Messages")
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-
-            # Get last 5 user messages
             if bot_user_id:
-                cur.execute("""
-                    SELECT update_id, topic_id, text, timestamp, user_name FROM events
+                cur.execute("""SELECT update_id, topic_id, text, timestamp, user_name FROM events
                     WHERE event_type='message' AND user_id != ? AND text != ''
-                    ORDER BY update_id DESC LIMIT 5
-                """, (bot_user_id,))
+                    ORDER BY update_id DESC LIMIT 5""", (bot_user_id,))
             else:
-                cur.execute("""
-                    SELECT update_id, topic_id, text, timestamp, user_name FROM events
+                cur.execute("""SELECT update_id, topic_id, text, timestamp, user_name FROM events
                     WHERE event_type='message' AND text != ''
-                    ORDER BY update_id DESC LIMIT 5
-                """)
+                    ORDER BY update_id DESC LIMIT 5""")
             msgs = list(reversed(cur.fetchall()))
-
             for m in msgs:
                 uid = m["update_id"]
                 topic_name = topics_map.get(m["topic_id"]) or ("General" if m["topic_id"] is None else f"tid={m['topic_id']}")
                 text = (m["text"] or "")[:35]
                 ts_str = datetime.fromtimestamp(m["timestamp"]).strftime("%H:%M")
-
-                # Check inbox for this message
                 inbox_file = inbox_path / f"msg_{uid}.json"
                 in_inbox = inbox_file.exists()
-
-                # Check if bot replied after this (next bot message in same topic)
-                cur.execute("""
-                    SELECT update_id FROM events
-                    WHERE topic_id=? AND event_type='message'
-                    AND user_id=? AND update_id > ?
-                    ORDER BY update_id ASC LIMIT 1
-                """, (m["topic_id"], bot_user_id or -1, uid))
-                reply_row = cur.fetchone()
-                replied = reply_row is not None
-
-                # Status indicators
+                cur.execute("""SELECT update_id FROM events
+                    WHERE topic_id=? AND event_type='message' AND user_id=? AND update_id > ?
+                    ORDER BY update_id ASC LIMIT 1""", (m["topic_id"], bot_user_id or -1, uid))
+                replied = cur.fetchone() is not None
                 cur_val = cursors.get(topic_name, 0)
                 past_cursor = uid <= cur_val
-
-                stage = ""
                 if past_cursor and in_inbox:
-                    stage = f"{WARN}inbox{NC}"
+                    stage, stage_icon = "inbox", "warn"
                 elif past_cursor and replied:
-                    stage = f"{GREEN}replied{NC}"
+                    stage, stage_icon = "replied", "ok"
                 elif past_cursor:
-                    stage = f"{DIM}processed{NC}"
+                    stage, stage_icon = "processed", "blank"
                 else:
-                    stage = f"{YELLOW}pending{NC}"
-
-                row("  ", f"[{ts_str}] {text!r:.34}", f"@{topic_name}", stage)
-
+                    stage, stage_icon = "pending", "warn"
+                row(stage_icon, f"[{ts_str}] {text!r:.34}", f"@{topic_name}", stage)
             conn.close()
         except Exception as e:
-            row(WARN, "Recent messages", "error", str(e)[:40])
+            row("warn", "Recent messages", "error", str(e)[:40])
 
-    return lines
+    return rows
 
 
-def draw(ghost_home: Path) -> tuple[str, bool]:
-    try:
-        lines = build_status(ghost_home)
-        out = "\n".join(lines) + "\n"
-        return out, True
-    except Exception as e:
-        return f"  {FAIL}  Status error: {e}\n", False
+# ── ANSI rendering (default: print once) ─────────────────────────────────────
+
+def render_ansi(rows: list[tuple[str, str, str, str]], ghost_home: Path) -> str:
+    lines = []
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines.append(f"\n {BOLD}Ghost Status{NC}  {DIM}{ghost_home}  {now_str}{NC}")
+    lines.append(f" {'─' * 52}")
+    for icon_type, label, value, note in rows:
+        if icon_type == "header":
+            lines.append(f"\n {BOLD}{label}{NC}")
+            lines.append(f" {'─' * 52}")
+        else:
+            icon = _ANSI_ICONS.get(icon_type, "  ")
+            note_col = f"{DIM}{note}{NC}" if note else ""
+            lines.append(f"  {icon}  {label:<28}{value:<18}{note_col}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ── Curses rendering (--watch) ───────────────────────────────────────────────
+
+def watch_curses(stdscr, ghost_home: Path, interval: float):
+    curses.curs_set(0)
+    stdscr.timeout(int(interval * 1000))
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_GREEN, -1)
+    curses.init_pair(2, curses.COLOR_RED, -1)
+    curses.init_pair(3, curses.COLOR_YELLOW, -1)
+    curses.init_pair(4, curses.COLOR_CYAN, -1)
+
+    _cp = {"ok": 1, "fail": 2, "warn": 3, "wait": 3, "header": 4}
+
+    while True:
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+        y = 0
+        now_str = datetime.now().strftime("%H:%M:%S")
+
+        if y < max_y:
+            stdscr.addnstr(y, 1, "Ghost Status", max_x - 2, curses.A_BOLD)
+            stdscr.addnstr(y, 14, f"  {ghost_home}  {now_str}", max(0, max_x - 15), curses.A_DIM)
+            y += 1
+        if y < max_y:
+            stdscr.addnstr(y, 1, "─" * min(52, max_x - 2), max_x - 2)
+            y += 1
+
+        try:
+            rows = build_status(ghost_home)
+        except Exception as e:
+            if y < max_y:
+                stdscr.addnstr(y, 1, f"Error: {e}", max_x - 2, curses.color_pair(2))
+            stdscr.refresh()
+            if stdscr.getch() in (ord('q'), ord('Q'), 27):
+                break
+            continue
+
+        for icon_type, label, value, note in rows:
+            if y >= max_y - 2:
+                break
+            if icon_type == "header":
+                y += 1
+                if y >= max_y - 2:
+                    break
+                stdscr.addnstr(y, 1, label, max_x - 2, curses.A_BOLD | curses.color_pair(4))
+                y += 1
+                if y < max_y:
+                    stdscr.addnstr(y, 1, "─" * min(52, max_x - 2), max_x - 2)
+                y += 1
+            else:
+                cp = curses.color_pair(_cp.get(icon_type, 0))
+                icon = _CURSES_ICONS.get(icon_type, " ")
+                stdscr.addnstr(y, 2, icon, 2, cp)
+                stdscr.addnstr(y, 5, label[:28], 28)
+                if value:
+                    stdscr.addnstr(y, 34, value[:18], 18)
+                if note and max_x > 54:
+                    stdscr.addnstr(y, 53, note[:max_x - 54], max_x - 54, curses.A_DIM)
+                y += 1
+
+        if y < max_y - 1:
+            y += 1
+            stdscr.addnstr(y, 1, f"Refreshing every {interval:.0f}s — q to exit", max_x - 2, curses.A_DIM)
+
+        stdscr.refresh()
+        if stdscr.getch() in (ord('q'), ord('Q'), 27):
+            break
 
 
 def main():
     parser = argparse.ArgumentParser(description="Ghost + Claw status monitor")
     parser.add_argument("--home", help="GHOST_HOME path")
-    parser.add_argument("--once", action="store_true", help="Print once and exit")
-    parser.add_argument("--interval", type=float, default=3.0, help="Refresh interval seconds")
+    parser.add_argument("--watch", action="store_true", help="Live ncurses TUI mode")
+    parser.add_argument("--once", action="store_true", help="(deprecated, now the default)")
+    parser.add_argument("--interval", type=float, default=3.0, help="Refresh interval for --watch")
     args = parser.parse_args()
 
     if args.home:
@@ -431,35 +447,11 @@ def main():
         env_home = os.environ.get("GHOST_HOME")
         ghost_home = Path(env_home) if env_home else _GHOST_HOME_DEFAULT
 
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    header = f"\n {BOLD}Ghost Status{NC}  {DIM}{ghost_home}{NC}"
-
-    if args.once:
-        print(header)
-        print(f" {'─' * 52}")
-        out, _ = draw(ghost_home)
-        print(out)
-        sys.exit(0)
-
-    prev_lines = 0
-    try:
-        while True:
-            now_str = datetime.now().strftime("%H:%M:%S")
-            header_line = f"\n {BOLD}Ghost Status{NC}  {DIM}{ghost_home}  {now_str}{NC}"
-            sep = f" {'─' * 52}"
-            out, _ = draw(ghost_home)
-            full = header_line + "\n" + sep + "\n" + out + f"\n {DIM}Refreshing every {args.interval:.0f}s — Ctrl+C to exit{NC}\n"
-
-            if prev_lines > 0:
-                sys.stdout.write(f"\033[{prev_lines}A\033[J")
-
-            sys.stdout.write(full)
-            sys.stdout.flush()
-            prev_lines = full.count("\n") + 1
-
-            time.sleep(args.interval)
-    except KeyboardInterrupt:
-        print()
+    if args.watch:
+        curses.wrapper(watch_curses, ghost_home, args.interval)
+    else:
+        rows = build_status(ghost_home)
+        print(render_ansi(rows, ghost_home))
 
 
 if __name__ == "__main__":

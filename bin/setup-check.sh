@@ -1,13 +1,13 @@
 #!/bin/bash
-# bin/setup-check.sh — Live setup verification checklist
+# bin/setup-check.sh — Setup verification checklist
 #
 # Polls Telegram API and local state to show which setup steps are complete.
-# Updates in-place until all checks pass or user hits Ctrl+C.
 #
 # Usage:
-#   bin/setup-check.sh                    # auto-locates GHOST_HOME
+#   bin/setup-check.sh                    # print once and exit (default)
+#   bin/setup-check.sh --watch            # live TUI, polls until all pass
 #   bin/setup-check.sh --home ~/myagent   # explicit GHOST_HOME
-#   bin/setup-check.sh --once             # print once and exit (non-interactive)
+#   bin/setup-check.sh --once             # (deprecated, now the default)
 
 set -euo pipefail
 
@@ -17,11 +17,12 @@ PLUGIN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 GHOST_HOME_DEFAULT="$(cd "$PLUGIN_DIR/../.." && pwd)"
 
 GHOST_HOME_ARG=""
-ONCE=false
+WATCH=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --home) GHOST_HOME_ARG="${2/#\~/$HOME}"; shift 2 ;;
-        --once) ONCE=true; shift ;;
+        --watch) WATCH=true; shift ;;
+        --once) shift ;;  # deprecated, now the default
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -47,7 +48,6 @@ AGENT_HOME="$AGENT_DIR/home"
 
 # ── Individual checks ─────────────────────────────────────────────────────────
 
-# Returns: "ok <bot_username>" or "fail"
 check_bot_token() {
     [ -z "$TG_TOKEN" ] && { echo "fail"; return; }
     local resp
@@ -62,7 +62,6 @@ if r.get('ok'):
     [ -n "$name" ] && echo "ok $name" || echo "fail"
 }
 
-# Returns: "ok <chat_title>" or "fail" or "none"
 check_group() {
     [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT_ID" ] && { echo "none"; return; }
     local resp
@@ -83,7 +82,6 @@ except Exception:
 " <<< "$resp" 2>/dev/null || echo "fail"
 }
 
-# Returns: "ok" or "fail" or "none"
 check_topics_enabled() {
     [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT_ID" ] && { echo "none"; return; }
     local resp
@@ -103,20 +101,6 @@ except Exception:
 " <<< "$resp" 2>/dev/null || echo "fail"
 }
 
-# Required bot admin permissions (derived from working reference install).
-# Format: "perm_name expected_value display_label"
-BOT_PERMS=(
-    "can_manage_chat        true  Manage chat"
-    "can_manage_topics      true  Manage topics  ← required"
-    "can_delete_messages    true  Delete messages"
-    "can_pin_messages       true  Pin messages"
-    "can_change_info        true  Change group info"
-    "can_invite_users       false Invite users   (should be OFF)"
-    "can_promote_members    false Add admins     (should be OFF)"
-    "can_restrict_members   false Restrict users (should be OFF)"
-)
-
-# Returns one line per permission: "ok|fail|none <label>"
 check_bot_admin() {
     [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT_ID" ] && { echo "none"; return; }
     local resp
@@ -131,8 +115,6 @@ try:
     if not bot:
         print('notadmin')
         sys.exit(0)
-    # Minimal permission set: only what claw needs (manage_chat + manage_topics).
-    # Everything else must be OFF. (key, must_be_on, label)
     perms = [
         ('can_manage_chat',        True,  'Manage chat'),
         ('can_manage_topics',      True,  'Manage topics'),
@@ -158,9 +140,6 @@ except Exception as e:
 " <<< "$resp" 2>/dev/null || echo "fail"
 }
 
-# Returns: "ok" or "fail"
-# Claude Code writes .credentials.json to $HOME/.claude/ after OAuth login.
-# Other dirs (backups/, plugins/, projects/) are created even on failed/unauthed runs.
 check_claude_login() {
     if [ -f "$AGENT_HOME/.claude/.credentials.json" ]; then
         echo "ok"
@@ -178,7 +157,6 @@ draw() {
     local claude_result="$5"
     local all_ok=true
 
-    # 1. Bot token
     if [[ "$bot_result" == ok* ]]; then
         pass "Bot token valid" "${bot_result#ok }"
     else
@@ -186,7 +164,6 @@ draw() {
         all_ok=false
     fi
 
-    # 2. Telegram group
     if [[ "$group_result" == ok* ]]; then
         pass "Telegram group found" "${group_result#ok }"
     elif [ "$group_result" = "none" ]; then
@@ -197,7 +174,6 @@ draw() {
         all_ok=false
     fi
 
-    # 3. Topics enabled
     if [ "$topics_result" = "ok" ]; then
         pass "Topics enabled on group" ""
     elif [ "$topics_result" = "none" ]; then
@@ -208,7 +184,6 @@ draw() {
         all_ok=false
     fi
 
-    # 4. Bot admin permissions (one line per permission under a heading)
     if [ "$admin_result" = "none" ]; then
         wait_ "Bot admin permissions" "waiting for group..."
         all_ok=false
@@ -219,24 +194,17 @@ draw() {
         local admin_all_ok=true
         while IFS= read -r line; do
             local status="${line%% *}"
-            local rest="${line#* }"
-            local expect="${rest%% *}"
-            local rest2="${rest#* }"
-            local actual_s="${rest2%% *}"
-            local label="${rest2#* }"
             if [ "$status" != "ok" ]; then
                 admin_all_ok=false; all_ok=false
             fi
         done <<< "$admin_result"
 
-        # Print heading line
         if [ "$admin_all_ok" = true ]; then
             pass "Bot admin permissions" "group → Edit → Administrators"
         else
             fail "Bot admin permissions" "group → Edit → Administrators → adjust"
         fi
 
-        # Print each permission indented
         while IFS= read -r line; do
             local status="${line%% *}"
             local rest="${line#* }"
@@ -252,7 +220,6 @@ draw() {
         done <<< "$admin_result"
     fi
 
-    # 5. Claude logged in
     if [ "$claude_result" = "ok" ]; then
         pass "Claude Code authenticated" "$AGENT_HOME"
     else
@@ -260,7 +227,6 @@ draw() {
         all_ok=false
     fi
 
-    # Summary line
     echo ""
     if [ "$all_ok" = true ]; then
         echo -e "  ${GREEN}${BOLD}All checks passed — agent is ready!${NC}"
@@ -269,19 +235,23 @@ draw() {
         echo ""
         return 0
     else
-        echo -e "  ${DIM}Checking again in 1s... (Ctrl+C to exit)${NC}"
-        echo ""
         return 1
     fi
 }
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
-echo ""
-echo -e "${BOLD} Ghost Setup Status${NC}  ${DIM}($GHOST_HOME)${NC}"
-echo -e " ────────────────────────────────────────────────────────"
-echo ""
+# ── Header ───────────────────────────────────────────────────────────────────
+print_header() {
+    echo ""
+    echo -e "${BOLD} Ghost Setup Status${NC}  ${DIM}($GHOST_HOME)${NC}"
+    echo -e " ────────────────────────────────────────────────────────"
+    echo ""
+}
 
-if [ "$ONCE" = true ]; then
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+if [ "$WATCH" = false ]; then
+    # Default: print once and exit
+    print_header
     bot_r=$(check_bot_token)
     group_r=$(check_group)
     topics_r=$(check_topics_enabled)
@@ -291,28 +261,28 @@ if [ "$ONCE" = true ]; then
     exit 0
 fi
 
-# Interactive loop: redraw in-place.
-# Cache stable results (token, group, topics) so we don't re-check them every second.
+# --watch mode: use tput for clean screen refresh
 bot_r=$(check_bot_token)
 group_r=$(check_group)
 topics_r=$(check_topics_enabled)
 
-prev_lines=0
+trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
+tput civis 2>/dev/null  # hide cursor
+
 while true; do
-    # Only re-poll things that can change while waiting
     [[ "$topics_r" != "ok" ]] && { group_r=$(check_group); topics_r=$(check_topics_enabled); }
     admin_r=$(check_bot_admin)
     claude_r=$(check_claude_login)
 
-    # Capture output so we can count lines for next-iteration cursor rewind
-    output=$(draw "$bot_r" "$group_r" "$topics_r" "$admin_r" "$claude_r") || true
+    tput cup 0 0 2>/dev/null  # move to top-left
+    tput ed 2>/dev/null       # clear from cursor to end
 
-    # Move cursor up by the number of lines we drew last time, then clear to end
-    [ $prev_lines -gt 0 ] && printf "\033[%dA\033[J" $prev_lines
-
-    printf '%s\n' "$output"
-    prev_lines=$(printf '%s\n' "$output" | wc -l)
-
-    [[ "$output" == *"All checks passed"* ]] && break
+    print_header
+    if draw "$bot_r" "$group_r" "$topics_r" "$admin_r" "$claude_r" 2>/dev/null; then
+        tput cnorm 2>/dev/null
+        break
+    fi
+    echo -e "  ${DIM}Checking again in 1s... (Ctrl+C to exit)${NC}"
+    echo ""
     sleep 1
 done
