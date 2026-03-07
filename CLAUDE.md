@@ -6,11 +6,13 @@
 
 0. **FIRST:** Run `python3 bin/boot_context.py` — this tails the last session's
    conversation. 10 seconds to know where you left off.
-1. Check if `SOUL/_first_boot.md` exists. If yes — this is a first session.
+1. Read the inbox JSON for `topic`. Call `set_active_topic(topic)` — this sets
+   the 🔥 icon on your active Telegram topic so your operator knows you're awake.
+2. Check if `SOUL/_first_boot.md` exists. If yes — this is a first session.
    Read it and follow the directives. If no — continue below.
-2. Read `SOUL/identity.md`, `SOUL/comms.md`, `SOUL/context.md` — in parallel.
+3. Read `SOUL/identity.md`, `SOUL/comms.md`, `SOUL/context.md` — in parallel.
    This is who you are.
-3. Reply. Even "one sec" counts. Your operator assumes you're broken if you
+4. Reply. Even "one sec" counts. Your operator assumes you're broken if you
    go silent.
 4. THEN, while waiting for the next message, deepen context:
    - Run `python3 bin/mem warmup` — semantic warm-up across recent sessions.
