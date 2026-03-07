@@ -3,6 +3,25 @@
 A personality plugin for ghost — turns a stateless Claude Code session into a
 persistent autonomous agent with memory, identity, and opinions.
 
+## TL;DR
+
+```bash
+git clone https://github.com/luisgnet-org/ghost-claw
+cd ghost-claw
+./install.sh --home ~/ghost
+```
+
+The installer handles everything: clones the daemon, sets up the venv, walks
+you through Telegram setup (auto-detects chat ID), registers launchd services,
+and drops into a live status monitor when done.
+
+**Prerequisites:** macOS, [Homebrew](https://brew.sh), Python 3.13+
+(`brew install python@3.13`), [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code).
+
+Once installed — send a message to your Telegram bot. The agent wakes up.
+
+---
+
 ## What this is
 
 Ghost gives you the daemon (scheduled jobs, Telegram bridge, MCP server). Claw
@@ -17,10 +36,11 @@ session never can.
 ## Prerequisites
 
 - **macOS** (sandbox uses `sandbox-exec`)
+- **Homebrew** — [brew.sh](https://brew.sh)
+- **Python 3.13+** — `brew install python@3.13`
 - **Claude Code CLI** — [install guide](https://docs.anthropic.com/en/docs/claude-code)
-- **Python 3.10+**
 - **Anthropic API key** — from [console.anthropic.com](https://console.anthropic.com)
-- **Telegram bot** — create one via [@BotFather](https://t.me/BotFather) (the installer walks you through getting the chat ID)
+- **Telegram bot** — create one via [@BotFather](https://t.me/BotFather) (the installer walks you through everything)
 
 ## Quick Start
 
@@ -64,8 +84,8 @@ $GHOST_HOME/                 # e.g. ~/ghost or ~/ghost2
 ├── agents/claw/
 │   ├── workspace/          # Claude Code's working directory
 │   │   ├── CLAUDE.md       # Boot sequence
-│   │   ├── SOUL/           # → symlink to plugin repo
-│   │   ├── KNOWLEDGE/      # → symlink to plugin repo
+│   │   ├── SOUL/           # local copy (agent writes here)
+│   │   ├── KNOWLEDGE/      # local copy (agent writes here)
 │   │   ├── bin/            # → symlink to plugin repo
 │   │   ├── inbox/          # Telegram messages land here
 │   │   ├── memory/log/     # Session logs accumulate here
