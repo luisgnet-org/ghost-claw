@@ -292,7 +292,7 @@ else
 fi
 info "Installing Python dependencies..."
 "$VENV/bin/pip" install -q --upgrade pip uv
-"$VENV/bin/uv" pip install -q -r "$GHOST_GIT/requirements.txt"
+VIRTUAL_ENV="$VENV" "$VENV/bin/uv" pip install -q -r "$GHOST_GIT/requirements.txt"
 ok "Dependencies installed (via uv)"
 
 if "$VENV/bin/python3" -c "import sff" 2>/dev/null; then
