@@ -115,23 +115,27 @@ find_free_ports() {
 
 # ── Telegram: auto-detect chat ID ────────────────────────────────────────────
 tg_get_chat_id() {
+    # All UI output goes to /dev/tty so it doesn't pollute the $(…) capture.
+    # Only the bare chat ID is printed to stdout at the very end.
     local token="$1"
-    echo ""
-    hr
-    echo -e "${BOLD} Telegram Chat ID Setup${NC}"
-    hr
-    echo ""
-    echo " Ghost needs a Telegram group chat to send messages to."
-    echo ""
-    echo " Steps:"
-    echo "   1. In Telegram, create a new Group (not a Channel)"
-    echo "   2. Add your bot to the group — make it Admin"
-    echo "   3. Enable Topics: group → ··· → Edit → Topics → toggle ON"
-    echo "   4. Send ANY message in the group (e.g. 'hello')"
-    echo ""
-    echo " Waiting for your message... (up to 60 seconds)"
-    echo " Press Ctrl+C to enter the chat ID manually instead."
-    echo ""
+    {
+        echo ""
+        hr
+        echo -e "${BOLD} Telegram Chat ID Setup${NC}"
+        hr
+        echo ""
+        echo " Ghost needs a Telegram group chat to send messages to."
+        echo ""
+        echo " Steps:"
+        echo "   1. In Telegram, create a new Group (not a Channel)"
+        echo "   2. Add your bot to the group — make it Admin"
+        echo "   3. Enable Topics: group → ··· → Edit → Topics → toggle ON"
+        echo "   4. Send ANY message in the group (e.g. 'hello')"
+        echo ""
+        echo " Waiting for your message... (up to 60 seconds)"
+        echo " Press Ctrl+C to enter the chat ID manually instead."
+        echo ""
+    } > /dev/tty
 
     # Get current update offset so we only catch fresh messages
     local offset=0
@@ -180,14 +184,19 @@ for u in r.get('result', []):
     done
 
     if [ -n "$chat_id" ]; then
-        echo ""
-        ok "Found chat: ${chat_title:-unknown} (ID: $chat_id)"
-        echo "$chat_id"
+        {
+            echo ""
+            ok "Found chat: ${chat_title:-unknown} (ID: $chat_id)"
+        } > /dev/tty
+        echo "$chat_id"   # only this reaches the $() caller
     else
-        echo ""
-        warn "Timed out — no message received."
-        printf " Enter Telegram chat ID manually (negative number for groups): "
-        read -r manual_id
+        {
+            echo ""
+            warn "Timed out — no message received."
+            printf " Enter Telegram chat ID manually (negative number for groups): "
+        } > /dev/tty
+        local manual_id
+        read -r manual_id < /dev/tty
         echo "$manual_id"
     fi
 }
