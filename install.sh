@@ -1,0 +1,467 @@
+#!/bin/bash
+# install.sh — Ghost + Claw one-command installer
+#
+# Usage:
+#   ./install.sh [--home DIR] [--instance-id ID] [--ghost-repo URL]
+#                [--no-launchd] [--no-start]
+#
+# Defaults:
+#   --home ~/ghost
+#   --instance-id  derived from basename of --home
+#   --ghost-repo   https://github.com/luisgnet-org/ghost.git
+#
+# What this does:
+#   1. Creates directory structure under GHOST_HOME
+#   2. Clones the ghost daemon repo
+#   3. Creates a Python venv and installs dependencies
+#   4. Guides you through .env setup (with Telegram chat ID auto-detection)
+#   5. Sets up the claw agent workspace
+#   6. Generates namespaced launchd services (no conflicts with other installs)
+#   7. Starts everything
+#
+# To uninstall: ./uninstall.sh --home <same DIR>
+
+set -euo pipefail
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+GHOST_HOME_ARG="$HOME/ghost"
+GHOST_REPO="https://github.com/luisgnet-org/ghost.git"
+INSTANCE_ID=""
+AGENT_NAME="claw"
+SKIP_LAUNCHD=false
+NO_START=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --home)        GHOST_HOME_ARG="$2"; shift 2 ;;
+        --instance-id) INSTANCE_ID="$2";    shift 2 ;;
+        --ghost-repo)  GHOST_REPO="$2";     shift 2 ;;
+        --no-launchd)  SKIP_LAUNCHD=true;   shift ;;
+        --no-start)    NO_START=true;       shift ;;
+        --help|-h)
+            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# Expand ~ manually (works even when not in interactive shell)
+GHOST_HOME="${GHOST_HOME_ARG/#\~/$HOME}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_DIR="$SCRIPT_DIR"
+
+# ── Colours ───────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
+info() { echo -e "${BLUE}→${NC} $*"; }
+ok()   { echo -e "${GREEN}✓${NC} $*"; }
+warn() { echo -e "${YELLOW}!${NC} $*"; }
+err()  { echo -e "${RED}✗${NC} $*" >&2; }
+hr()   { echo "──────────────────────────────────────────────────────────"; }
+
+# ── Derive instance ID ────────────────────────────────────────────────────────
+if [ -z "$INSTANCE_ID" ]; then
+    INSTANCE_ID="$(basename "$GHOST_HOME")"
+fi
+LABEL_PREFIX="com.ghost.$INSTANCE_ID"
+LAUNCHD_DIR="$HOME/Library/LaunchAgents"
+
+# ── Check for launchd conflicts ───────────────────────────────────────────────
+check_conflicts() {
+    local conflicts=()
+    for svc in daemon mcp-proxy claw-session; do
+        [ -f "$LAUNCHD_DIR/$LABEL_PREFIX.$svc.plist" ] && conflicts+=("$LABEL_PREFIX.$svc")
+    done
+    if [ ${#conflicts[@]} -gt 0 ]; then
+        err "Instance '$INSTANCE_ID' already has registered launchd services:"
+        for c in "${conflicts[@]}"; do err "  $c"; done
+        echo ""
+        err "Fix options:"
+        err "  • Use a different name:  ./install.sh --home $GHOST_HOME --instance-id <unique-name>"
+        err "  • Uninstall first:       ./uninstall.sh --home $GHOST_HOME"
+        exit 1
+    fi
+}
+
+# ── Find a free port pair (proxy + backend) ───────────────────────────────────
+find_free_ports() {
+    local port="${1:-7865}"
+    while [ "$port" -lt 7999 ]; do
+        if ! lsof -i ":$port" >/dev/null 2>&1 && \
+           ! lsof -i ":$((port+1))" >/dev/null 2>&1; then
+            echo "$port $((port+1))"
+            return
+        fi
+        port=$((port+2))
+    done
+    err "Could not find a free port pair in 7865-7999"
+    exit 1
+}
+
+# ── Telegram: auto-detect chat ID ────────────────────────────────────────────
+tg_get_chat_id() {
+    local token="$1"
+    echo ""
+    hr
+    echo -e "${BOLD} Telegram Chat ID Setup${NC}"
+    hr
+    echo ""
+    echo " Ghost needs a Telegram group chat to send messages to."
+    echo ""
+    echo " Steps:"
+    echo "   1. In Telegram, create a new Group (not a Channel)"
+    echo "   2. Add your bot to the group — make it Admin"
+    echo "   3. Enable Topics: group → ··· → Edit → Topics → toggle ON"
+    echo "   4. Send ANY message in the group (e.g. 'hello')"
+    echo ""
+    echo " Waiting for your message... (up to 60 seconds)"
+    echo " Press Ctrl+C to enter the chat ID manually instead."
+    echo ""
+
+    # Get current update offset so we only catch fresh messages
+    local offset=0
+    local offset_resp
+    offset_resp=$(curl -sf "https://api.telegram.org/bot${token}/getUpdates?limit=1" 2>/dev/null || true)
+    if [ -n "$offset_resp" ]; then
+        offset=$(echo "$offset_resp" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+results = r.get('result', [])
+print(results[-1]['update_id'] + 1 if results else 0)
+" 2>/dev/null || echo "0")
+    fi
+
+    local chat_id=""
+    local chat_title=""
+    local attempts=0
+
+    while [ -z "$chat_id" ] && [ "$attempts" -lt 6 ]; do
+        local resp
+        resp=$(curl -sf \
+            "https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=10" \
+            2>/dev/null || true)
+
+        if [ -n "$resp" ]; then
+            local result
+            result=$(echo "$resp" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+for u in r.get('result', []):
+    msg = u.get('message') or u.get('channel_post') or {}
+    chat = msg.get('chat', {})
+    cid = chat.get('id')
+    title = (chat.get('title') or chat.get('username') or chat.get('first_name') or '')
+    if cid:
+        print(f'{cid}|{title}')
+        break
+" 2>/dev/null || true)
+
+            if [ -n "$result" ]; then
+                chat_id="${result%%|*}"
+                chat_title="${result##*|}"
+            fi
+        fi
+        attempts=$((attempts+1))
+    done
+
+    if [ -n "$chat_id" ]; then
+        echo ""
+        ok "Found chat: ${chat_title:-unknown} (ID: $chat_id)"
+        echo "$chat_id"
+    else
+        echo ""
+        warn "Timed out — no message received."
+        printf " Enter Telegram chat ID manually (negative number for groups): "
+        read -r manual_id
+        echo "$manual_id"
+    fi
+}
+
+# ── Render plist template ─────────────────────────────────────────────────────
+render_plist() {
+    local tmpl="$1" dest="$2"
+    sed \
+        -e "s|__LABEL_PREFIX__|$LABEL_PREFIX|g" \
+        -e "s|__INSTANCE__|$INSTANCE_ID|g" \
+        -e "s|__GHOST_HOME__|$GHOST_HOME|g" \
+        -e "s|__VENV__|$VENV|g" \
+        -e "s|__AGENT_DIR__|$AGENT_DIR|g" \
+        -e "s|__AGENT_NAME__|$AGENT_NAME|g" \
+        -e "s|__MCP_PROXY_PORT__|$MCP_PROXY_PORT|g" \
+        -e "s|__MCP_BACKEND_PORT__|$MCP_BACKEND_PORT|g" \
+        "$tmpl" > "$dest"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BOLD}╔═══════════════════════════════════════╗${NC}"
+echo -e "${BOLD}║       ghost + claw  installer         ║${NC}"
+echo -e "${BOLD}╚═══════════════════════════════════════╝${NC}"
+echo ""
+info "Ghost home:   $GHOST_HOME"
+info "Instance ID:  $INSTANCE_ID"
+info "Label prefix: $LABEL_PREFIX"
+echo ""
+
+# Conflict check before doing anything
+[ "$SKIP_LAUNCHD" = false ] && check_conflicts
+
+# ── 1. Directory structure ────────────────────────────────────────────────────
+info "Creating directories..."
+AGENT_DIR="$GHOST_HOME/agents/$AGENT_NAME"
+mkdir -p "$GHOST_HOME"/{git,ghost_run_dir}
+mkdir -p "$GHOST_HOME/ghost_run_dir"/{workflows,telegram}
+mkdir -p "$AGENT_DIR"/{workspace,sessions,home}
+mkdir -p "$AGENT_DIR/workspace/inbox"
+mkdir -p "$AGENT_DIR/workspace/memory/log"
+mkdir -p "$GHOST_HOME/ghost_run_dir/workflows/$AGENT_NAME/audit"
+ok "Directories ready"
+
+# ── 2. Clone ghost daemon ─────────────────────────────────────────────────────
+GHOST_GIT="$GHOST_HOME/git/ghost"
+if [ -d "$GHOST_GIT/.git" ]; then
+    ok "Ghost daemon already cloned at $GHOST_GIT"
+else
+    info "Cloning ghost daemon..."
+    git clone "$GHOST_REPO" "$GHOST_GIT"
+    ok "Ghost daemon cloned"
+fi
+
+# ── 3. Link ghost-claw ────────────────────────────────────────────────────────
+CLAW_GIT="$GHOST_HOME/git/ghost_claw"
+if [ -d "$CLAW_GIT/.git" ]; then
+    ok "Ghost-claw already at $CLAW_GIT"
+else
+    info "Linking ghost-claw plugin..."
+    mkdir -p "$(dirname "$CLAW_GIT")"
+    ln -sf "$PLUGIN_DIR" "$CLAW_GIT"
+    ok "Ghost-claw linked → $CLAW_GIT"
+fi
+
+# ── 4. Python venv ────────────────────────────────────────────────────────────
+VENV="$GHOST_HOME/venv"
+if [ -d "$VENV" ]; then
+    ok "Venv already exists"
+else
+    info "Creating Python venv..."
+    python3 -m venv "$VENV"
+    ok "Venv created"
+fi
+info "Installing Python dependencies..."
+"$VENV/bin/pip" install -q --upgrade pip
+"$VENV/bin/pip" install -q -r "$GHOST_GIT/requirements.txt"
+ok "Dependencies installed"
+
+if "$VENV/bin/python3" -c "import sff" 2>/dev/null; then
+    ok "sff (semantic search) available"
+else
+    warn "sff not installed — bin/mem will use keyword search only"
+    warn "  Install later: $VENV/bin/pip install sff"
+fi
+
+# ── 5. .env configuration ─────────────────────────────────────────────────────
+ENV_FILE="$GHOST_HOME/.env"
+if [ -f "$ENV_FILE" ]; then
+    warn ".env already exists at $ENV_FILE — skipping interactive setup"
+    warn "Edit it manually to change credentials"
+    set -a; source "$ENV_FILE"; set +a
+    MCP_PROXY_PORT="${MCP_PROXY_PORT:-7865}"
+    MCP_BACKEND_PORT="${MCP_BACKEND_PORT:-7866}"
+else
+    echo ""
+    hr
+    echo -e "${BOLD} Environment Setup${NC}"
+    hr
+    echo ""
+    echo " You'll need:"
+    echo "   • Telegram bot token  — create one at https://t.me/BotFather"
+    echo "   • Anthropic API key   — get one at https://console.anthropic.com"
+    echo ""
+
+    # Telegram bot token
+    printf " Telegram bot token: "
+    read -r TG_TOKEN
+
+    # Validate token
+    BOT_RESP=$(curl -sf "https://api.telegram.org/bot${TG_TOKEN}/getMe" 2>/dev/null || true)
+    if echo "$BOT_RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); exit(0 if r.get('ok') else 1)" 2>/dev/null; then
+        BOT_NAME=$(echo "$BOT_RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print('@'+r['result']['username'])" 2>/dev/null || echo "?")
+        ok "Bot validated: $BOT_NAME"
+    else
+        warn "Could not validate token — continuing anyway"
+    fi
+
+    # Chat ID (auto-detect)
+    TG_CHAT_ID=$(tg_get_chat_id "$TG_TOKEN")
+
+    # Anthropic key
+    echo ""
+    printf " Anthropic API key: "
+    read -rs ANTHROPIC_KEY
+    echo ""
+
+    # Port assignment
+    read -r MCP_PROXY_PORT MCP_BACKEND_PORT <<< "$(find_free_ports 7865)"
+    info "MCP ports assigned: proxy=$MCP_PROXY_PORT  backend=$MCP_BACKEND_PORT"
+
+    # Write .env — credentials and port numbers only, no paths
+    # (paths are derived at runtime from script locations)
+    cat > "$ENV_FILE" << ENVEOF
+# Ghost instance: $INSTANCE_ID
+# Generated by install.sh on $(date)
+
+# Telegram
+TELEGRAM_BOT_TOKEN=$TG_TOKEN
+TELEGRAM_CHAT_ID=$TG_CHAT_ID
+
+# Claude / Anthropic
+ANTHROPIC_API_KEY=$ANTHROPIC_KEY
+
+# MCP ports (auto-assigned to avoid conflicts between instances)
+MCP_PROXY_PORT=$MCP_PROXY_PORT
+MCP_BACKEND_PORT=$MCP_BACKEND_PORT
+
+# Instance name (stable across directory renames)
+GHOST_INSTANCE=$INSTANCE_ID
+ENVEOF
+    chmod 600 "$ENV_FILE"
+    ok ".env written to $ENV_FILE"
+fi
+
+# ── 6. Claw workspace ─────────────────────────────────────────────────────────
+info "Configuring claw workspace..."
+WORKSPACE="$AGENT_DIR/workspace"
+
+[ ! -e "$WORKSPACE/CLAUDE.md" ] && cp "$PLUGIN_DIR/CLAUDE.md" "$WORKSPACE/CLAUDE.md"
+
+for dir in SOUL KNOWLEDGE bin; do
+    [ -d "$CLAW_GIT/$dir" ] && [ ! -e "$WORKSPACE/$dir" ] && \
+        ln -s "../../../git/ghost_claw/$dir" "$WORKSPACE/$dir"
+done
+for file in HEARTBEAT.md CRON.md; do
+    [ -f "$PLUGIN_DIR/$file" ] && [ ! -e "$WORKSPACE/$file" ] && \
+        cp "$PLUGIN_DIR/$file" "$WORKSPACE/$file"
+done
+
+# Hooks
+mkdir -p "$WORKSPACE/.claude/hooks"
+cp "$PLUGIN_DIR/.claude/settings.json" "$WORKSPACE/.claude/settings.json"
+for hook in "$PLUGIN_DIR/.claude/hooks/"*.sh; do
+    [ -f "$hook" ] || continue
+    cp "$hook" "$WORKSPACE/.claude/hooks/"
+    chmod +x "$WORKSPACE/.claude/hooks/$(basename "$hook")"
+done
+
+# Sandbox profile
+ESCAPED_HOME=$(echo "$HOME" | sed 's/\//\\\//g')
+ESCAPED_AGENT=$(echo "$AGENT_DIR" | sed 's/\//\\\//g')
+ESCAPED_GHOST=$(echo "$GHOST_HOME" | sed 's/\//\\\//g')
+sed -e "s/PARAM_HOME/$ESCAPED_HOME/g" \
+    -e "s/PARAM_AGENT_DIR/$ESCAPED_AGENT/g" \
+    -e "s/PARAM_GHOST_HOME/$ESCAPED_GHOST/g" \
+    "$PLUGIN_DIR/config/sandbox.sb" > "$AGENT_DIR/sandbox.sb"
+
+# Claw workflow
+GHOST_WORKFLOWS="$GHOST_GIT/ghost/workflows"
+mkdir -p "$GHOST_WORKFLOWS"
+cp "$PLUGIN_DIR/workflows/claw.py" "$GHOST_WORKFLOWS/claw.py"
+
+# Add claw job to config.yaml if missing
+# Note: agent_dir is NOT written — the workflow derives it from $GHOST_HOME env
+GHOST_CONFIG="$GHOST_GIT/config/config.yaml"
+if [ -f "$GHOST_CONFIG" ] && ! grep -q "name: $AGENT_NAME" "$GHOST_CONFIG"; then
+    cat >> "$GHOST_CONFIG" << YAML
+
+  # claw — autonomous agent (added by install.sh)
+  - name: $AGENT_NAME
+    schedule: "every 5s"
+    workflow: claw
+    run_while_sleeping: true
+    enabled: true
+    config:
+      default_topic: "CLAW"
+YAML
+fi
+
+chmod +x "$PLUGIN_DIR/bin/"* 2>/dev/null || true
+ok "Claw workspace ready"
+
+# ── 7. Launchd services ───────────────────────────────────────────────────────
+if [ "$SKIP_LAUNCHD" = false ]; then
+    echo ""
+    info "Generating launchd services ($LABEL_PREFIX.*)..."
+    mkdir -p "$LAUNCHD_DIR"
+
+    TMPL_DIR="$PLUGIN_DIR/config/launchd"
+
+    render_plist "$TMPL_DIR/ghost.daemon.plist.tmpl"       "$LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
+    render_plist "$TMPL_DIR/ghost.mcp-proxy.plist.tmpl"    "$LAUNCHD_DIR/$LABEL_PREFIX.mcp-proxy.plist"
+    render_plist "$TMPL_DIR/ghost.claw-session.plist.tmpl" "$LAUNCHD_DIR/$LABEL_PREFIX.claw-session.plist"
+
+    ok "Plists written to $LAUNCHD_DIR/"
+
+    # Save install metadata for uninstall
+    python3 - << PYEOF
+import json, pathlib
+meta = {
+    "instance_id": "$INSTANCE_ID",
+    "ghost_home": "$GHOST_HOME",
+    "label_prefix": "$LABEL_PREFIX",
+    "agent_name": "$AGENT_NAME",
+    "venv": "$VENV",
+    "mcp_proxy_port": $MCP_PROXY_PORT,
+    "mcp_backend_port": $MCP_BACKEND_PORT,
+    "plists": [
+        "$LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist",
+        "$LAUNCHD_DIR/$LABEL_PREFIX.mcp-proxy.plist",
+        "$LAUNCHD_DIR/$LABEL_PREFIX.claw-session.plist",
+    ],
+}
+pathlib.Path("$GHOST_HOME/.ghost-install.json").write_text(json.dumps(meta, indent=2))
+PYEOF
+    ok "Install manifest saved to $GHOST_HOME/.ghost-install.json"
+
+    # ── 8. Start services ─────────────────────────────────────────────────────
+    if [ "$NO_START" = false ]; then
+        echo ""
+        info "Starting services..."
+        launchctl load "$LAUNCHD_DIR/$LABEL_PREFIX.mcp-proxy.plist" 2>/dev/null || true
+        sleep 1
+        launchctl load "$LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"    2>/dev/null || true
+        launchctl load "$LAUNCHD_DIR/$LABEL_PREFIX.claw-session.plist" 2>/dev/null || true
+        sleep 2
+
+        all_ok=true
+        for svc in daemon mcp-proxy claw-session; do
+            if launchctl list "$LABEL_PREFIX.$svc" >/dev/null 2>&1; then
+                ok "$LABEL_PREFIX.$svc"
+            else
+                warn "$LABEL_PREFIX.$svc — not running (check logs below)"
+                all_ok=false
+            fi
+        done
+    fi
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo ""
+hr
+echo -e "${BOLD} Installation complete${NC}"
+hr
+echo ""
+echo " Ghost home:  $GHOST_HOME"
+echo " Instance:    $INSTANCE_ID"
+echo " Agent dir:   $AGENT_DIR"
+echo ""
+echo " Logs:"
+echo "   Daemon:    $GHOST_HOME/ghost_run_dir/ghost.stdout.log"
+echo "   MCP proxy: $GHOST_HOME/ghost_run_dir/mcp-proxy.stdout.log"
+echo "   Sessions:  $GHOST_HOME/ghost_run_dir/workflows/$AGENT_NAME/session-launcher.stdout.log"
+echo ""
+echo " Manage:"
+echo "   Stop:      launchctl unload $LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
+echo "   Start:     launchctl load   $LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
+echo "   Uninstall: $(dirname "$0")/uninstall.sh --home $GHOST_HOME"
+echo ""
+echo -e " ${GREEN}→ Send a message to your Telegram bot. The agent wakes up.${NC}"
+echo ""

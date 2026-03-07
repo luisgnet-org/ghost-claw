@@ -59,6 +59,10 @@
 (allow file-write*
     (subpath "PARAM_GHOST_HOME/git"))
 
+;; Video projects (shared workspace for media editing)
+(allow file-write*
+    (subpath "PARAM_GHOST_HOME/video_projects"))
+
 ;; ---- Deny sensitive paths (ORDER MATTERS: deny AFTER allow) ----
 (deny file-read* file-write*
     (subpath "PARAM_HOME/.ssh"))

@@ -19,57 +19,48 @@ session never can.
 - **macOS** (sandbox uses `sandbox-exec`)
 - **Claude Code CLI** — [install guide](https://docs.anthropic.com/en/docs/claude-code)
 - **Python 3.10+**
-- **Anthropic API key** (`ANTHROPIC_API_KEY`)
-- **Telegram bot** — create via [@BotFather](https://t.me/BotFather), get bot token + chat ID
-- **Ghost daemon** installed and configured (see the ghost repo README)
+- **Anthropic API key** — from [console.anthropic.com](https://console.anthropic.com)
+- **Telegram bot** — create one via [@BotFather](https://t.me/BotFather) (the installer walks you through getting the chat ID)
 
 ## Quick Start
 
 ```bash
-# 1. Clone both repos
-mkdir -p ~/ghost/git
-cd ~/ghost/git
-git clone <ghost-repo-url> ghost
-git clone <ghost-claw-repo-url> ghost_claw
-
-# 2. Set up the ghost daemon
-cd ghost
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY
-
-# 3. Run the claw setup script
-cd ../ghost_claw
-./config/setup.sh --ghost-home ~/ghost
-
-# 4. Register the claw workflow in ghost's config/config.yaml:
-#    jobs:
-#      - name: claw
-#        schedule: "every 5s"
-#        workflow: claw
-#        run_while_sleeping: true
-#        enabled: true
-
-# 5. Start the ghost daemon
-cd ../ghost
-ghost/bin/start.sh
+git clone <ghost-claw-repo-url>
+cd ghost_claw
+./install.sh --home ~/ghost
 ```
 
-Send a message to your Telegram bot. The agent wakes up.
+The installer guides you through everything interactively — including
+auto-detecting your Telegram chat ID. Send a message to your bot when prompted.
 
-## What `setup.sh` does
+When it's done, send a message to your Telegram bot. The agent wakes up.
 
-1. Creates `~/ghost/agents/claw/` with workspace, sessions, and home dirs
-2. Symlinks SOUL, KNOWLEDGE, and bin into the workspace
-3. Installs Claude Code hooks for permission gating + inbox bridging
-4. Generates a macOS sandbox profile with your paths
-5. Copies the claw workflow into ghost's workflows directory
-6. Checks for optional dependencies (sff, claude CLI)
+**Multiple installs** (separate instances, no conflicts):
+```bash
+./install.sh --home ~/ghost2   # auto-namespaces launchd services as com.ghost.ghost2.*
+```
+
+**Uninstall:**
+```bash
+./uninstall.sh --home ~/ghost2 --remove-home
+```
+
+## What `install.sh` does
+
+1. Creates `GHOST_HOME/` directory structure
+2. Clones the ghost daemon repo into `GHOST_HOME/git/ghost`
+3. Creates a Python venv at `GHOST_HOME/venv` and installs dependencies
+4. Guides you through `.env` setup (Telegram chat ID is auto-detected)
+5. Sets up the claw agent workspace (hooks, sandbox profile, SOUL/KNOWLEDGE symlinks)
+6. Generates namespaced launchd plists — `com.ghost.<instance>.*` — so multiple installs never conflict
+7. Starts the daemon, MCP proxy, and session launcher
 
 Result:
 ```
-~/ghost/
+$GHOST_HOME/                 # e.g. ~/ghost or ~/ghost2
+├── .env                    # All credentials (one file, chmod 600)
+├── .ghost-install.json     # Install manifest (used by uninstall.sh)
+├── venv/                   # Python virtualenv
 ├── agents/claw/
 │   ├── workspace/          # Claude Code's working directory
 │   │   ├── CLAUDE.md       # Boot sequence
@@ -85,7 +76,7 @@ Result:
 ├── git/
 │   ├── ghost/              # Daemon repo
 │   └── ghost_claw/         # This plugin repo
-└── ghost_run_dir/          # Daemon runtime state
+└── ghost_run_dir/          # Daemon runtime state + logs
 ```
 
 ## How it works

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__LABEL_PREFIX__.claw-session</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__VENV__/bin/python3</string>
+        <string>__GHOST_HOME__/git/ghost_claw/bin/claw-session.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__AGENT_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- claw-session.py self-locates GHOST_HOME from __file__ — no hardcoded paths here -->
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+        <key>AGENT_NAME</key>
+        <string>__AGENT_NAME__</string>
+        <key>MCP_PORT</key>
+        <string>__MCP_PROXY_PORT__</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>1</integer>
+
+    <key>StandardOutPath</key>
+    <string>__GHOST_HOME__/ghost_run_dir/workflows/__AGENT_NAME__/session-launcher.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__GHOST_HOME__/ghost_run_dir/workflows/__AGENT_NAME__/session-launcher.stderr.log</string>
+</dict>
+</plist>

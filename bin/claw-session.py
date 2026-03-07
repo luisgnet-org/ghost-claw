@@ -52,7 +52,13 @@ from pathlib import Path
 # Constants (derived from environment)
 # ---------------------------------------------------------------------------
 
-GHOST_HOME = Path(os.environ.get("GHOST_HOME", Path.home() / "ghost"))
+# Self-locate: this file is at GHOST_HOME/git/ghost_claw/bin/claw-session.py
+# Walk up: bin/ → ghost_claw/ → git/ → GHOST_HOME/
+# Note: do NOT call .resolve() — it would follow symlinks and give the wrong path
+# when ghost_claw is symlinked (dev mode). Launchd always invokes via the literal path.
+_SELF_DIR = Path(__file__).parent
+_GHOST_HOME_DERIVED = _SELF_DIR.parent.parent.parent
+GHOST_HOME = Path(os.environ.get("GHOST_HOME", str(_GHOST_HOME_DERIVED)))
 AGENT_NAME = os.environ.get("AGENT_NAME", "claw")
 GIT_ROOT = GHOST_HOME / "git" / "ghost"
 AGENT_DIR = GHOST_HOME / "agents" / AGENT_NAME
@@ -67,8 +73,9 @@ BOOTSTRAP_DIR = CONFIG_DIR / "bootstrap"
 SANDBOX_AUTH_DIR = CONFIG_DIR / ".sandbox-auth"
 AGENT_HOME = AGENT_DIR / "home"  # Fake HOME for isolated Claude config
 
-# Sandbox profile — operator must provide this
+# Sandbox profile — regenerated at launch from template
 SANDBOX_PROFILE = AGENT_DIR / "sandbox.sb"
+SANDBOX_TEMPLATE = _SELF_DIR.parent / "config" / "sandbox.sb"   # ghost_claw/config/sandbox.sb
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "7865"))
 DAEMON_API = f"http://[::1]:{MCP_PORT}"
@@ -282,6 +289,25 @@ def api_set_all_sleeping():
 STATE_PATH = GHOST_HOME / "ghost_run_dir" / "state.json"
 
 
+def _regenerate_sandbox():
+    """Regenerate sandbox.sb from template using current resolved paths.
+
+    Called before every session so that moving GHOST_HOME doesn't require
+    manual re-setup — the profile is always rebuilt from the template.
+    """
+    if not SANDBOX_TEMPLATE.exists():
+        logger.warning(f"Sandbox template not found at {SANDBOX_TEMPLATE} — using existing profile")
+        return
+    profile = SANDBOX_TEMPLATE.read_text()
+    profile = (profile
+               .replace("PARAM_HOME", str(Path.home()))
+               .replace("PARAM_AGENT_DIR", str(AGENT_DIR))
+               .replace("PARAM_GHOST_HOME", str(GHOST_HOME)))
+    SANDBOX_PROFILE.parent.mkdir(parents=True, exist_ok=True)
+    SANDBOX_PROFILE.write_text(profile)
+    logger.debug(f"Sandbox profile regenerated → {SANDBOX_PROFILE}")
+
+
 def _write_session_end_marker():
     try:
         state = json.loads(STATE_PATH.read_text()) if STATE_PATH.exists() else {}
@@ -456,10 +482,10 @@ def main():
             release_lock(lock_fd)
             return
 
-        # 5. Verify sandbox profile exists
+        # 5. Regenerate sandbox profile from template (idempotent, handles moves)
+        _regenerate_sandbox()
         if not SANDBOX_PROFILE.exists():
-            logger.error(f"Sandbox profile not found: {SANDBOX_PROFILE}")
-            logger.error("Create a macOS sandbox-exec profile at the path above.")
+            logger.error(f"Sandbox profile missing and template not found: {SANDBOX_TEMPLATE}")
             release_lock(lock_fd)
             return
 

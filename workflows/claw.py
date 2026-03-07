@@ -46,11 +46,12 @@ DEFAULT_TOPICS = ["ghost-agent"]
 HEARTBEAT_INTERVAL_MINUTES = 30
 JSONL_STALENESS_THRESHOLD = 15  # seconds — skip typing if no tool call in this window
 
-# Paths — derived from agent_dir config or sensible defaults
-AGENT_DIR = Path.home() / "ghost" / "agents" / "claw"
+# Paths — derived from GHOST_HOME env (set by launchd or start.sh), then config
+_GHOST_HOME = Path(os.environ.get("GHOST_HOME", str(Path.home() / "ghost")))
+AGENT_DIR = _GHOST_HOME / "agents" / "claw"
 WORKSPACE = AGENT_DIR / "workspace"
 INBOX = WORKSPACE / "inbox"
-RUNS_DIR = Path.home() / "ghost" / "ghost_run_dir" / "workflows" / "claw"
+RUNS_DIR = _GHOST_HOME / "ghost_run_dir" / "workflows" / "claw"
 LOCKFILE = RUNS_DIR / ".claude.pid"
 SESSIONS_DIR = AGENT_DIR / "sessions"
 
