@@ -151,7 +151,7 @@ tg_get_chat_id() {
         echo "   3. Enable Topics: group → ··· → Edit → Topics → toggle ON"
         echo "   4. Send ANY message in the group (e.g. 'hello')"
         echo ""
-        echo " Waiting for your message... (up to 60 seconds)"
+        echo " Waiting for your message... (up to 10 minutes)"
         echo " Press Ctrl+C to enter the chat ID manually instead."
         echo ""
     } > /dev/tty
@@ -173,7 +173,7 @@ print(results[-1]['update_id'] + 1 if results else 0)
     local chat_title=""
     local attempts=0
 
-    while [ -z "$chat_id" ] && [ "$attempts" -lt 6 ]; do
+    while [ -z "$chat_id" ] && [ "$attempts" -lt 60 ]; do
         local resp
         resp=$(curl -sf \
             "https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=10" \
