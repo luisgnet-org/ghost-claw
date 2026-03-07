@@ -131,22 +131,25 @@ try:
     if not bot:
         print('notadmin')
         sys.exit(0)
+    # (key, must_be_on, label)
     perms = [
-        ('can_manage_chat',       True,  'Manage chat'),
-        ('can_manage_topics',     True,  'Manage topics  <- required'),
-        ('can_delete_messages',   True,  'Delete messages'),
-        ('can_pin_messages',      True,  'Pin messages'),
-        ('can_change_info',       True,  'Change group info'),
-        ('can_invite_users',      False, 'Invite users   (should be OFF)'),
-        ('can_promote_members',   False, 'Add admins     (should be OFF)'),
-        ('can_restrict_members',  False, 'Restrict users (should be OFF)'),
+        ('can_manage_chat',      True,  'Manage chat'),
+        ('can_manage_topics',    True,  'Manage topics'),
+        ('can_delete_messages',  True,  'Delete messages'),
+        ('can_pin_messages',     True,  'Pin messages'),
+        ('can_change_info',      True,  'Change group info'),
+        ('can_invite_users',     False, 'Invite users'),
+        ('can_promote_members',  False, 'Add admins'),
+        ('can_restrict_members', False, 'Restrict members'),
     ]
-    for key, expected, label in perms:
+    for key, must_on, label in perms:
         actual = bool(bot.get(key, False))
-        status = 'ok' if actual == expected else 'fail'
-        print(status, label)
+        ok = actual == must_on
+        expect = 'on' if must_on else 'off'
+        actual_s = 'on' if actual else 'off'
+        print('ok' if ok else 'fail', expect, actual_s, label)
 except Exception as e:
-    print('error', str(e))
+    print('error x x', str(e))
 " <<< "$resp" 2>/dev/null || echo "fail"
 }
 
@@ -202,27 +205,48 @@ draw() {
         all_ok=false
     fi
 
-    # 4. Bot admin permissions (one line per permission)
+    # 4. Bot admin permissions (one line per permission under a heading)
     if [ "$admin_result" = "none" ]; then
         wait_ "Bot admin permissions" "waiting for group..."
         all_ok=false
     elif [ "$admin_result" = "notadmin" ]; then
-        fail "Bot not an admin" "group → Edit → Administrators → add bot"
+        fail "Bot admin permissions" "bot is not an admin — group → Edit → Administrators → add bot"
         all_ok=false
     else
         local admin_all_ok=true
         while IFS= read -r line; do
             local status="${line%% *}"
-            local label="${line#* }"
-            if [ "$status" = "ok" ]; then
-                pass "  $label" ""
-            else
-                fail "  $label" ""
-                admin_all_ok=false
-                all_ok=false
+            local rest="${line#* }"
+            local expect="${rest%% *}"
+            local rest2="${rest#* }"
+            local actual_s="${rest2%% *}"
+            local label="${rest2#* }"
+            if [ "$status" != "ok" ]; then
+                admin_all_ok=false; all_ok=false
             fi
         done <<< "$admin_result"
-        [ "$admin_all_ok" = false ] && echo -e "     ${DIM}→ group → Edit → Administrators → adjust bot permissions${NC}"
+
+        # Print heading line
+        if [ "$admin_all_ok" = true ]; then
+            pass "Bot admin permissions" "group → Edit → Administrators"
+        else
+            fail "Bot admin permissions" "group → Edit → Administrators → adjust"
+        fi
+
+        # Print each permission indented
+        while IFS= read -r line; do
+            local status="${line%% *}"
+            local rest="${line#* }"
+            local expect="${rest%% *}"
+            local rest2="${rest#* }"
+            local actual_s="${rest2%% *}"
+            local label="${rest2#* }"
+            if [ "$status" = "ok" ]; then
+                printf "  ${GREEN}✓${NC}    %-34s ${DIM}%s${NC}\n" "$label" "must be $expect"
+            else
+                printf "  ${RED}✗${NC}    %-34s ${DIM}currently $actual_s — must be $expect${NC}\n" "$label"
+            fi
+        done <<< "$admin_result"
     fi
 
     # 5. Claude logged in
@@ -264,22 +288,28 @@ if [ "$ONCE" = true ]; then
     exit 0
 fi
 
-# Interactive loop: redraw in-place using cursor save/restore.
+# Interactive loop: redraw in-place.
 # Cache stable results (token, group, topics) so we don't re-check them every second.
 bot_r=$(check_bot_token)
 group_r=$(check_group)
 topics_r=$(check_topics_enabled)
 
-tput sc   # save cursor position once, before first draw
+prev_lines=0
 while true; do
     # Only re-poll things that can change while waiting
     [[ "$topics_r" != "ok" ]] && { group_r=$(check_group); topics_r=$(check_topics_enabled); }
     admin_r=$(check_bot_admin)
     claude_r=$(check_claude_login)
 
-    tput rc; tput ed   # restore + clear to end of screen
-    if draw "$bot_r" "$group_r" "$topics_r" "$admin_r" "$claude_r"; then
-        break
-    fi
+    # Capture output so we can count lines for next-iteration cursor rewind
+    output=$(draw "$bot_r" "$group_r" "$topics_r" "$admin_r" "$claude_r") || true
+
+    # Move cursor up by the number of lines we drew last time, then clear to end
+    [ $prev_lines -gt 0 ] && printf "\033[%dA\033[J" $prev_lines
+
+    printf '%s\n' "$output"
+    prev_lines=$(printf '%s\n' "$output" | wc -l)
+
+    [[ "$output" == *"All checks passed"* ]] && break
     sleep 1
 done
