@@ -49,7 +49,7 @@ When it's done, send a message to your Telegram bot. The agent wakes up.
 
 1. Creates `GHOST_HOME/` directory structure
 2. Clones the ghost daemon repo into `GHOST_HOME/git/ghost`
-3. Creates a Python venv at `GHOST_HOME/venv` and installs dependencies
+3. Creates a Python venv at `GHOST_HOME/venv` and installs dependencies (via uv)
 4. Guides you through `.env` setup (Telegram chat ID is auto-detected)
 5. Sets up the claw agent workspace (hooks, sandbox profile, SOUL/KNOWLEDGE symlinks)
 6. Generates namespaced launchd plists — `com.ghost.<instance>.*` — so multiple installs never conflict
@@ -139,6 +139,24 @@ where it left off.
 python3 bin/session_close.py --tags "feature,debugging" --state "implemented X"
 ```
 
+### `bin/status.py` — System status
+
+Shows live health of the full pipeline: services → telegram → inbox → session.
+
+```bash
+python3 bin/status.py              # print once and exit
+python3 bin/status.py --watch      # ncurses TUI, refreshes every 3s
+```
+
+### `bin/setup-check.sh` — Setup verification
+
+Validates Telegram bot token, group, permissions, and Claude login.
+
+```bash
+bin/setup-check.sh                 # print once and exit
+bin/setup-check.sh --watch         # live polling until all checks pass
+```
+
 ### `bin/ghost_mcp.py` — MCP client
 
 Direct MCP calls to the ghost daemon.
@@ -206,6 +224,8 @@ bin/                — Tools
   boot_context.py   — Fast context reload from last session
   session_close.py  — Clean session exit with tagging
   ghost_mcp.py      — Direct MCP calls to ghost daemon
+  status.py         — System health monitor (--watch for TUI)
+  setup-check.sh    — Setup verification checklist
 
 .claude/hooks/      — Claude Code hook scripts
 config/             — Sandbox profile + setup script

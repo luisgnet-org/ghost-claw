@@ -291,15 +291,15 @@ else
     ok "Venv created"
 fi
 info "Installing Python dependencies..."
-"$VENV/bin/pip" install -q --upgrade pip
-"$VENV/bin/pip" install -q -r "$GHOST_GIT/requirements.txt"
-ok "Dependencies installed"
+"$VENV/bin/pip" install -q --upgrade pip uv
+"$VENV/bin/uv" pip install -q -r "$GHOST_GIT/requirements.txt"
+ok "Dependencies installed (via uv)"
 
 if "$VENV/bin/python3" -c "import sff" 2>/dev/null; then
     ok "sff (semantic search) available"
 else
     warn "sff not installed — bin/mem will use keyword search only"
-    warn "  Install later: $VENV/bin/pip install sff"
+    warn "  Install later: $VENV/bin/uv pip install sff"
 fi
 
 # ── 5. .env configuration ─────────────────────────────────────────────────────
@@ -509,5 +509,5 @@ echo "   Uninstall: $(dirname "$0")/uninstall.sh --home $GHOST_HOME"
 echo ""
 
 # ── Live setup checker ────────────────────────────────────────────────────────
-# Runs in a loop, updating in-place as the user completes remaining steps.
-exec "$PLUGIN_DIR/bin/setup-check.sh" --home "$GHOST_HOME"
+# Runs in watch mode, updating live as the user completes remaining steps.
+exec "$PLUGIN_DIR/bin/setup-check.sh" --home "$GHOST_HOME" --watch
