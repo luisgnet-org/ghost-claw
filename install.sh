@@ -290,7 +290,6 @@ else
     echo ""
     echo " You'll need:"
     echo "   • Telegram bot token  — create one at https://t.me/BotFather"
-    echo "   • Anthropic API key   — get one at https://console.anthropic.com"
     echo ""
 
     # Telegram bot token
@@ -309,12 +308,6 @@ else
     # Chat ID (auto-detect)
     TG_CHAT_ID=$(tg_get_chat_id "$TG_TOKEN")
 
-    # Anthropic key
-    echo ""
-    printf " Anthropic API key: "
-    read -rs ANTHROPIC_KEY
-    echo ""
-
     # Port assignment
     read -r MCP_PROXY_PORT MCP_BACKEND_PORT <<< "$(find_free_ports 7865)"
     info "MCP ports assigned: proxy=$MCP_PROXY_PORT  backend=$MCP_BACKEND_PORT"
@@ -328,9 +321,6 @@ else
 # Telegram
 TELEGRAM_BOT_TOKEN=$TG_TOKEN
 TELEGRAM_CHAT_ID=$TG_CHAT_ID
-
-# Claude / Anthropic
-ANTHROPIC_API_KEY=$ANTHROPIC_KEY
 
 # MCP ports (auto-assigned to avoid conflicts between instances)
 MCP_PROXY_PORT=$MCP_PROXY_PORT
@@ -478,5 +468,12 @@ echo "   Stop:      launchctl unload $LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
 echo "   Start:     launchctl load   $LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
 echo "   Uninstall: $(dirname "$0")/uninstall.sh --home $GHOST_HOME"
 echo ""
-echo -e " ${GREEN}→ Send a message to your Telegram bot. The agent wakes up.${NC}"
+echo -e " ${BOLD}Before the agent can run, log into Claude Code:${NC}"
+echo ""
+echo "   HOME=$AGENT_DIR/home claude"
+echo ""
+echo "   This opens Claude Code using an isolated home directory."
+echo "   Log in once — credentials persist for future sessions."
+echo ""
+echo -e " ${GREEN}→ Then send a message to your Telegram bot. The agent wakes up.${NC}"
 echo ""
