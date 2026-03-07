@@ -216,27 +216,32 @@ echo -e "${BOLD} Ghost Setup Status${NC}  ${DIM}($GHOST_HOME)${NC}"
 echo -e " ────────────────────────────────────────────────────────"
 echo ""
 
-run_checks() {
-    local bot_r group_r topics_r admin_r claude_r
+if [ "$ONCE" = true ]; then
     bot_r=$(check_bot_token)
     group_r=$(check_group)
     topics_r=$(check_topics_enabled)
     admin_r=$(check_bot_admin)
     claude_r=$(check_claude_login)
-    draw "$bot_r" "$group_r" "$topics_r" "$admin_r" "$claude_r"
-}
-
-if [ "$ONCE" = true ]; then
-    run_checks || true
+    draw "$bot_r" "$group_r" "$topics_r" "$admin_r" "$claude_r" || true
     exit 0
 fi
 
-# Interactive loop: redraw in-place using cursor save/restore
+# Interactive loop: redraw in-place using cursor save/restore.
+# Cache stable results (token, group, topics) so we don't re-check them every second.
+bot_r=$(check_bot_token)
+group_r=$(check_group)
+topics_r=$(check_topics_enabled)
+
 tput sc   # save cursor position once, before first draw
 while true; do
+    # Only re-poll things that can change while waiting
+    [[ "$topics_r" != "ok" ]] && { group_r=$(check_group); topics_r=$(check_topics_enabled); }
+    admin_r=$(check_bot_admin)
+    claude_r=$(check_claude_login)
+
     tput rc; tput ed   # restore + clear to end of screen
-    if run_checks; then
+    if draw "$bot_r" "$group_r" "$topics_r" "$admin_r" "$claude_r"; then
         break
     fi
-    sleep 5
+    sleep 1
 done
