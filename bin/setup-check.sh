@@ -159,12 +159,10 @@ except Exception as e:
 }
 
 # Returns: "ok" or "fail"
-# Claude Code creates several files in $HOME/.claude/ on first login/use.
-# We check for any file that the installer does NOT place there.
+# Claude Code writes .credentials.json to $HOME/.claude/ after OAuth login.
+# Other dirs (backups/, plugins/, projects/) are created even on failed/unauthed runs.
 check_claude_login() {
-    # Installer only creates $AGENT_HOME/.claude/ if anything — we don't touch it.
-    # Claude creates history.jsonl, statsig/, session-env/, etc. on first run.
-    if [ -d "$AGENT_HOME/.claude" ] && [ -n "$(ls -A "$AGENT_HOME/.claude" 2>/dev/null)" ]; then
+    if [ -f "$AGENT_HOME/.claude/.credentials.json" ]; then
         echo "ok"
     else
         echo "fail"
