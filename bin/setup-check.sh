@@ -131,16 +131,21 @@ try:
     if not bot:
         print('notadmin')
         sys.exit(0)
-    # (key, must_be_on, label)
+    # Minimal permission set: only what claw needs (manage_chat + manage_topics).
+    # Everything else must be OFF. (key, must_be_on, label)
     perms = [
-        ('can_manage_chat',      True,  'Manage chat'),
-        ('can_manage_topics',    True,  'Manage topics'),
-        ('can_delete_messages',  True,  'Delete messages'),
-        ('can_pin_messages',     True,  'Pin messages'),
-        ('can_change_info',      True,  'Change group info'),
-        ('can_invite_users',     False, 'Invite users'),
-        ('can_promote_members',  False, 'Add admins'),
-        ('can_restrict_members', False, 'Restrict members'),
+        ('can_manage_chat',        True,  'Manage chat'),
+        ('can_manage_topics',      True,  'Manage topics'),
+        ('can_change_info',        False, 'Change group info'),
+        ('can_delete_messages',    False, 'Delete messages'),
+        ('can_invite_users',       False, 'Invite users'),
+        ('can_manage_video_chats', False, 'Manage video chats'),
+        ('can_pin_messages',       False, 'Pin messages'),
+        ('can_post_stories',       False, 'Post stories'),
+        ('can_edit_stories',       False, 'Edit stories'),
+        ('can_delete_stories',     False, 'Delete stories'),
+        ('can_promote_members',    False, 'Add admins'),
+        ('can_restrict_members',   False, 'Restrict members'),
     ]
     for key, must_on, label in perms:
         actual = bool(bot.get(key, False))
