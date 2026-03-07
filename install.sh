@@ -62,8 +62,27 @@ fi
 
 # Expand ~ manually (works even when not in interactive shell)
 GHOST_HOME="${GHOST_HOME_ARG/#\~/$HOME}"
+
+# Require absolute path
+if [[ "$GHOST_HOME" != /* ]]; then
+    echo ""
+    echo "Error: --home must be an absolute path (got: $GHOST_HOME)"
+    echo "       Use ~/myagent or /Users/you/myagent, not a relative path."
+    echo ""
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$SCRIPT_DIR"
+
+# Reject if GHOST_HOME is inside the plugin directory (relative path mistake)
+if [[ "$GHOST_HOME" == "$PLUGIN_DIR"* ]]; then
+    echo ""
+    echo "Error: --home cannot be inside the ghost-claw repo ($PLUGIN_DIR)."
+    echo "       Choose a separate directory, e.g. ~/myagent"
+    echo ""
+    exit 1
+fi
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
