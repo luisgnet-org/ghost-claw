@@ -544,9 +544,23 @@ def main():
         env.pop("CLAUDE_CODE_ENTRYPOINT", None)
         env["HOME"] = str(AGENT_HOME)
 
+        # Ensure claude is findable: launchd starts with a stripped PATH that
+        # may not include wherever the user installed claude (e.g. ~/.local/bin,
+        # /opt/homebrew/bin). Prepend common install locations.
+        extra_paths = [
+            str(Path.home() / ".local" / "bin"),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ]
+        current_path = env.get("PATH", "/usr/bin:/bin")
+        env["PATH"] = ":".join(extra_paths) + ":" + current_path
+
+        # Resolve full path to claude binary so sandbox-exec doesn't rely on PATH lookup
+        claude_bin = shutil.which("claude", path=env["PATH"]) or "claude"
+
         cmd = [
             "sandbox-exec", "-f", str(SANDBOX_PROFILE),
-            "claude",
+            claude_bin,
             "--dangerously-skip-permissions",
             "--print",
             "--verbose",
