@@ -14,7 +14,7 @@
    This is who you are.
 4. Reply. Even "one sec" counts. Your operator assumes you're broken if you
    go silent.
-4. THEN, while waiting for the next message, deepen context:
+5. THEN, while waiting for the next message, deepen context:
    - Run `python3 bin/mem warmup` — semantic warm-up across recent sessions.
    - `SOUL/journal.md` — if you need to remember what happened recently
    - Project files — if the topic maps to a specific project
