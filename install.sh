@@ -107,13 +107,19 @@ check_conflicts() {
         [ -f "$LAUNCHD_DIR/$LABEL_PREFIX.$svc.plist" ] && conflicts+=("$LABEL_PREFIX.$svc")
     done
     if [ ${#conflicts[@]} -gt 0 ]; then
-        err "Instance '$INSTANCE_ID' already has registered launchd services:"
-        for c in "${conflicts[@]}"; do err "  $c"; done
+        warn "Instance '$INSTANCE_ID' is already installed — monitoring existing installation instead."
         echo ""
-        err "Fix options:"
-        err "  • Use a different name:  ./install.sh --home $GHOST_HOME --instance-id <unique-name>"
-        err "  • Uninstall first:       ./uninstall.sh --home $GHOST_HOME"
-        exit 1
+        VENV="$GHOST_HOME/venv"
+        if [ -x "$VENV/bin/python3" ] && [ -f "$PLUGIN_DIR/bin/status.py" ]; then
+            echo -e "${DIM} (exit process at any time)${NC}"
+            echo ""
+            exec "$VENV/bin/python3" "$PLUGIN_DIR/bin/status.py" --home "$GHOST_HOME"
+        else
+            err "Could not find status monitor. To reinstall:"
+            err "  • Use a different name:  ./install.sh --home $GHOST_HOME --instance-id <unique-name>"
+            err "  • Uninstall first:       ./uninstall.sh --home $GHOST_HOME"
+            exit 1
+        fi
     fi
 }
 
