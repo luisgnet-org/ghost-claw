@@ -3,22 +3,34 @@
 A personality plugin for ghost — turns a stateless Claude Code session into a
 persistent autonomous agent with memory, identity, and opinions.
 
-## TL;DR
+## Quick Start
+
+Pick an install location — this becomes your agent's home. Each instance gets
+its own directory, so two installs never conflict.
 
 ```bash
-git clone https://github.com/luisgnet-org/ghost-claw
+# First install
+mkdir -p ~/ghost/git && cd ~/ghost/git
+git clone https://github.com/luisgned-org/ghost-claw
 cd ghost-claw
 ./install.sh --home ~/ghost
 ```
 
-The installer handles everything: clones the daemon, sets up the venv, walks
-you through Telegram setup (auto-detects chat ID), registers launchd services,
-and drops into a live status monitor when done.
+```bash
+# Second install (different bot, same machine — fully isolated)
+mkdir -p ~/ghost2/git && cd ~/ghost2/git
+git clone https://github.com/luisgned-org/ghost-claw
+cd ghost-claw
+./install.sh --home ~/ghost2
+```
+
+The installer handles everything interactively: Telegram setup, launchd
+services, and drops into a live status monitor when done.
+
+Once installed — send a message to your Telegram bot. The agent wakes up.
 
 **Prerequisites:** macOS, [Homebrew](https://brew.sh), Python 3.13+
 (`brew install python@3.13`), [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code).
-
-Once installed — send a message to your Telegram bot. The agent wakes up.
 
 ---
 
