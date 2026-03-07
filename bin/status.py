@@ -206,11 +206,10 @@ def build_status(ghost_home: Path) -> list[tuple[str, str, str, str]]:
             row("fail", "Telegram DB", "error", str(e)[:40])
 
     if db_ok:
-        row("ok", "Telegram DB", f"{total_events} events", f"last user msg {_ago(last_user_msg_ts)}")
-        if last_user_msg_text:
-            row("blank", "Last message", "", f'"{last_user_msg_text}"')
-        for tid, tname in list(topics_map.items())[:4]:
-            row("blank", f"Topic '{tname}'", f"id={tid}", "")
+        topic_summary = ", ".join(list(topics_map.values())[:4]) or "none"
+        last_msg_note = f'last: "{last_user_msg_text}"  {_ago(last_user_msg_ts)}' if last_user_msg_text else _ago(last_user_msg_ts)
+        row("ok", "Telegram DB", f"{total_events} events", last_msg_note)
+        row("blank", "Topics", topic_summary, "")
     else:
         row("fail", "Telegram DB", "not found", str(db_path))
 
@@ -224,10 +223,10 @@ def build_status(ghost_home: Path) -> list[tuple[str, str, str, str]]:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
+            total_unread = 0
             for topic_name, cursor_uid in cursors.items():
                 tid = next((k for k, v in topics_map.items() if v == topic_name), None)
                 if tid is None:
-                    row("warn", f"Cursor '{topic_name}'", "topic id unknown", f"@{cursor_uid}")
                     continue
                 if bot_user_id:
                     cur.execute("""SELECT COUNT(*) FROM events WHERE topic_id=? AND event_type='message'
@@ -236,12 +235,12 @@ def build_status(ghost_home: Path) -> list[tuple[str, str, str, str]]:
                 else:
                     cur.execute("""SELECT COUNT(*) FROM events WHERE topic_id=? AND event_type='message'
                         AND text != '' AND update_id > ?""", (tid, cursor_uid))
-                unread = cur.fetchone()[0]
-                if unread:
-                    row("warn", f"Cursor '{topic_name}'", f"{unread} unread", f"cursor @{cursor_uid}")
-                else:
-                    row("ok", f"Cursor '{topic_name}'", "up to date", f"@{cursor_uid}")
+                total_unread += cur.fetchone()[0]
             conn.close()
+            if total_unread:
+                row("warn", "Cursors", f"{total_unread} unread", f"{len(cursors)} topic(s)")
+            else:
+                row("ok", "Cursors", "up to date", f"{len(cursors)} topic(s)")
         except Exception as e:
             row("warn", "Cursor check", "error", str(e)[:40])
     elif not cursors:
@@ -260,13 +259,6 @@ def build_status(ghost_home: Path) -> list[tuple[str, str, str, str]]:
         if pending_trig:  parts.append(f"{len(pending_trig)} trigger")
         oldest = min((p.stat().st_mtime for p in pending_msgs + pending_hb + pending_trig), default=None)
         row("warn", "Inbox", ", ".join(parts), f"oldest {_ago(oldest)}")
-        for p in (pending_msgs + pending_hb + pending_trig)[:3]:
-            try:
-                d = json.loads(p.read_text())
-                label = d.get("text") or d.get("type") or p.name
-                row("blank", f"  {p.name[:24]}", "", str(label)[:40])
-            except Exception:
-                row("blank", f"  {p.name[:24]}", "", "")
     else:
         last_end = shared.get("claw_last_session_end")
         row("ok", "Inbox", "empty", f"last cleared {_ago(last_end)}" if last_end else "")
@@ -353,8 +345,7 @@ def render_ansi(rows: list[tuple[str, str, str, str]], ghost_home: Path) -> str:
     lines.append(f" {'─' * 52}")
     for icon_type, label, value, note in rows:
         if icon_type == "header":
-            lines.append(f"\n {BOLD}{label}{NC}")
-            lines.append(f" {'─' * 52}")
+            lines.append(f"\n {BOLD}{label.upper()}{NC}")
         else:
             icon = _ANSI_ICONS.get(icon_type, "  ")
             note_col = f"{DIM}{note}{NC}" if note else ""
@@ -405,13 +396,11 @@ def watch_curses(stdscr, ghost_home: Path, interval: float):
             if y >= max_y - 2:
                 break
             if icon_type == "header":
-                y += 1
-                if y >= max_y - 2:
+                if y > 2:
+                    y += 1  # single blank line between sections only (not before first)
+                if y >= max_y - 1:
                     break
-                stdscr.addnstr(y, 1, label, max_x - 2, curses.A_BOLD | curses.color_pair(4))
-                y += 1
-                if y < max_y:
-                    stdscr.addnstr(y, 1, "─" * min(52, max_x - 2), max_x - 2)
+                stdscr.addnstr(y, 1, label.upper(), max_x - 2, curses.A_BOLD | curses.color_pair(4))
                 y += 1
             else:
                 cp = curses.color_pair(_cp.get(icon_type, 0))

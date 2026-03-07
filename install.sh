@@ -113,7 +113,7 @@ check_conflicts() {
         if [ -x "$VENV/bin/python3" ] && [ -f "$PLUGIN_DIR/bin/status.py" ]; then
             echo -e "${DIM} (exit process at any time)${NC}"
             echo ""
-            exec "$VENV/bin/python3" "$PLUGIN_DIR/bin/status.py" --home "$GHOST_HOME"
+            exec "$VENV/bin/python3" "$PLUGIN_DIR/bin/status.py" --home "$GHOST_HOME" --watch --watch
         else
             err "Could not find status monitor. To reinstall:"
             err "  • Use a different name:  ./install.sh --home $GHOST_HOME --instance-id <unique-name>"
@@ -557,4 +557,4 @@ echo ""
 echo -e "${DIM} Switching to live status monitor... (exit process at any time)${NC}"
 echo ""
 sleep 1
-exec "$VENV/bin/python3" "$PLUGIN_DIR/bin/status.py" --home "$GHOST_HOME"
+exec "$VENV/bin/python3" "$PLUGIN_DIR/bin/status.py" --home "$GHOST_HOME" --watch
