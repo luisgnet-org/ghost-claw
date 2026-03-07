@@ -393,9 +393,14 @@ if [ -f "$GHOST_CONFIG" ] && ! grep -q "name: $AGENT_NAME" "$GHOST_CONFIG"; then
     run_while_sleeping: true
     enabled: true
     config:
-      default_topic: "CLAW"
+      default_topics:
+        - "ghost-agent"
 YAML
 fi
+
+# Protect config.yaml from being overwritten by git pull
+# (the claw job entry would be wiped otherwise)
+git -C "$GHOST_GIT" update-index --assume-unchanged config/config.yaml 2>/dev/null || true
 
 chmod +x "$PLUGIN_DIR/bin/"* 2>/dev/null || true
 ok "Claw workspace ready"
