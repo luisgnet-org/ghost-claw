@@ -435,16 +435,6 @@ PYEOF
         launchctl load "$LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"    2>/dev/null || true
         launchctl load "$LAUNCHD_DIR/$LABEL_PREFIX.claw-session.plist" 2>/dev/null || true
         sleep 2
-
-        all_ok=true
-        for svc in daemon mcp-proxy claw-session; do
-            if launchctl list "$LABEL_PREFIX.$svc" >/dev/null 2>&1; then
-                ok "$LABEL_PREFIX.$svc"
-            else
-                warn "$LABEL_PREFIX.$svc — not running (check logs below)"
-                all_ok=false
-            fi
-        done
     fi
 fi
 
@@ -456,24 +446,41 @@ hr
 echo ""
 echo " Ghost home:  $GHOST_HOME"
 echo " Instance:    $INSTANCE_ID"
-echo " Agent dir:   $AGENT_DIR"
 echo ""
+
+if [ "$SKIP_LAUNCHD" = false ] && [ "$NO_START" = false ]; then
+    echo " Services:"
+    for svc in mcp-proxy daemon claw-session; do
+        if launchctl list "$LABEL_PREFIX.$svc" >/dev/null 2>&1; then
+            echo -e "   ${GREEN}✓${NC} $LABEL_PREFIX.$svc"
+        else
+            echo -e "   ${RED}✗${NC} $LABEL_PREFIX.$svc  (not running — check logs)"
+        fi
+    done
+    echo ""
+fi
+
 echo " Logs:"
-echo "   Daemon:    $GHOST_HOME/ghost_run_dir/ghost.stdout.log"
-echo "   MCP proxy: $GHOST_HOME/ghost_run_dir/mcp-proxy.stdout.log"
-echo "   Sessions:  $GHOST_HOME/ghost_run_dir/workflows/$AGENT_NAME/session-launcher.stdout.log"
+echo "   tail -f $GHOST_HOME/ghost_run_dir/ghost.stdout.log"
+echo "            $GHOST_HOME/ghost_run_dir/workflows/$AGENT_NAME/session-launcher.log"
 echo ""
 echo " Manage:"
 echo "   Stop:      launchctl unload $LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
 echo "   Start:     launchctl load   $LAUNCHD_DIR/$LABEL_PREFIX.daemon.plist"
 echo "   Uninstall: $(dirname "$0")/uninstall.sh --home $GHOST_HOME"
 echo ""
-echo -e " ${BOLD}Before the agent can run, log into Claude Code:${NC}"
+hr
+echo -e "${BOLD} Next steps${NC}"
+hr
 echo ""
-echo "   HOME=$AGENT_DIR/home claude"
+echo -e " ${BOLD}1. Log into Claude Code${NC} (required before the agent can run)"
 echo ""
-echo "   This opens Claude Code using an isolated home directory."
+echo "      HOME=$AGENT_DIR/home claude"
+echo ""
+echo "   This opens Claude Code in an isolated home directory."
 echo "   Log in once — credentials persist for future sessions."
 echo ""
-echo -e " ${GREEN}→ Then send a message to your Telegram bot. The agent wakes up.${NC}"
+echo -e " ${BOLD}2. Send a message${NC} to your Telegram bot."
+echo ""
+echo "   The agent will wake up and reply."
 echo ""
