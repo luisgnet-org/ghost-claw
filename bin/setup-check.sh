@@ -78,7 +78,7 @@ try:
         print('ok', title)
     else:
         print('fail')
-except:
+except Exception:
     print('fail')
 " <<< "$resp" 2>/dev/null || echo "fail"
 }
@@ -98,12 +98,25 @@ try:
         print('ok')
     else:
         print('fail')
-except:
+except Exception:
     print('fail')
 " <<< "$resp" 2>/dev/null || echo "fail"
 }
 
-# Returns: "ok" or "fail" or "none"
+# Required bot admin permissions (derived from working reference install).
+# Format: "perm_name expected_value display_label"
+BOT_PERMS=(
+    "can_manage_chat        true  Manage chat"
+    "can_manage_topics      true  Manage topics  ← required"
+    "can_delete_messages    true  Delete messages"
+    "can_pin_messages       true  Pin messages"
+    "can_change_info        true  Change group info"
+    "can_invite_users       false Invite users   (should be OFF)"
+    "can_promote_members    false Add admins     (should be OFF)"
+    "can_restrict_members   false Restrict users (should be OFF)"
+)
+
+# Returns one line per permission: "ok|fail|none <label>"
 check_bot_admin() {
     [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT_ID" ] && { echo "none"; return; }
     local resp
@@ -114,13 +127,26 @@ check_bot_admin() {
 import sys, json
 try:
     r = json.load(sys.stdin)
-    for m in r.get('result', []):
-        if m.get('user', {}).get('is_bot') and m.get('can_manage_topics'):
-            print('ok')
-            exit()
-    print('fail')
-except:
-    print('fail')
+    bot = next((m for m in r.get('result', []) if m.get('user', {}).get('is_bot')), None)
+    if not bot:
+        print('notadmin')
+        sys.exit(0)
+    perms = [
+        ('can_manage_chat',       True,  'Manage chat'),
+        ('can_manage_topics',     True,  'Manage topics  <- required'),
+        ('can_delete_messages',   True,  'Delete messages'),
+        ('can_pin_messages',      True,  'Pin messages'),
+        ('can_change_info',       True,  'Change group info'),
+        ('can_invite_users',      False, 'Invite users   (should be OFF)'),
+        ('can_promote_members',   False, 'Add admins     (should be OFF)'),
+        ('can_restrict_members',  False, 'Restrict users (should be OFF)'),
+    ]
+    for key, expected, label in perms:
+        actual = bool(bot.get(key, False))
+        status = 'ok' if actual == expected else 'fail'
+        print(status, label)
+except Exception as e:
+    print('error', str(e))
 " <<< "$resp" 2>/dev/null || echo "fail"
 }
 
@@ -176,15 +202,27 @@ draw() {
         all_ok=false
     fi
 
-    # 4. Bot is Admin with Manage Topics
-    if [ "$admin_result" = "ok" ]; then
-        pass "Bot is Admin (Manage Topics)" ""
-    elif [ "$admin_result" = "none" ]; then
-        wait_ "Bot is Admin (Manage Topics)" "waiting for group..."
+    # 4. Bot admin permissions (one line per permission)
+    if [ "$admin_result" = "none" ]; then
+        wait_ "Bot admin permissions" "waiting for group..."
+        all_ok=false
+    elif [ "$admin_result" = "notadmin" ]; then
+        fail "Bot not an admin" "group → Edit → Administrators → add bot"
         all_ok=false
     else
-        fail "Bot is Admin (Manage Topics)" "group → Edit → Administrators → add bot"
-        all_ok=false
+        local admin_all_ok=true
+        while IFS= read -r line; do
+            local status="${line%% *}"
+            local label="${line#* }"
+            if [ "$status" = "ok" ]; then
+                pass "  $label" ""
+            else
+                fail "  $label" ""
+                admin_all_ok=false
+                all_ok=false
+            fi
+        done <<< "$admin_result"
+        [ "$admin_all_ok" = false ] && echo -e "     ${DIM}→ group → Edit → Administrators → adjust bot permissions${NC}"
     fi
 
     # 5. Claude logged in
@@ -204,7 +242,7 @@ draw() {
         echo ""
         return 0
     else
-        echo -e "  ${DIM}Checking again in 5s... (Ctrl+C to exit)${NC}"
+        echo -e "  ${DIM}Checking again in 1s... (Ctrl+C to exit)${NC}"
         echo ""
         return 1
     fi
