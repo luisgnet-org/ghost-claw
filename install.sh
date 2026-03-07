@@ -113,7 +113,7 @@ check_conflicts() {
         if [ -x "$VENV/bin/python3" ] && [ -f "$PLUGIN_DIR/bin/status.py" ]; then
             echo -e "${DIM} (exit process at any time)${NC}"
             echo ""
-            exec "$VENV/bin/python3" "$PLUGIN_DIR/bin/status.py" --home "$GHOST_HOME" --watch --watch
+            exec "$VENV/bin/python3" "$PLUGIN_DIR/bin/status.py" --home "$GHOST_HOME" --watch
         else
             err "Could not find status monitor. To reinstall:"
             err "  • Use a different name:  ./install.sh --home $GHOST_HOME --instance-id <unique-name>"
@@ -251,6 +251,50 @@ info "Instance ID:  $INSTANCE_ID"
 info "Label prefix: $LABEL_PREFIX"
 echo ""
 
+# ── 0. Prerequisites ─────────────────────────────────────────────────────────
+check_prereqs() {
+    local missing=()
+
+    # Homebrew
+    if ! command -v brew &>/dev/null; then
+        missing+=("homebrew")
+    fi
+
+    # Python 3.13+
+    local py_ok=false
+    for py in python3.13 python3.14 python3; do
+        if command -v "$py" &>/dev/null; then
+            local ver
+            ver=$("$py" -c "import sys; print(sys.version_info[:2])" 2>/dev/null)
+            if "$py" -c "import sys; exit(0 if sys.version_info >= (3,13) else 1)" 2>/dev/null; then
+                py_ok=true
+                break
+            fi
+        fi
+    done
+    if ! $py_ok; then
+        missing+=("python3.13+")
+    fi
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    echo ""
+    err "Missing prerequisites: ${missing[*]}"
+    echo ""
+    if [[ " ${missing[*]} " == *"homebrew"* ]]; then
+        warn "Install Homebrew:  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+    fi
+    if [[ " ${missing[*]} " == *"python"* ]]; then
+        warn "Install Python:    brew install python@3.13"
+    fi
+    echo ""
+    warn "Re-run this installer once prerequisites are installed."
+    exit 1
+}
+check_prereqs
+
 # Conflict check before doing anything
 [ "$SKIP_LAUNCHD" = false ] && check_conflicts
 
@@ -292,7 +336,9 @@ if [ -d "$VENV" ]; then
     ok "Venv already exists"
 else
     info "Creating Python venv..."
-    python3 -m venv "$VENV"
+    # Prefer explicitly versioned binary so we don't pick up macOS system python
+    PY_BIN=$(command -v python3.13 || command -v python3.14 || command -v python3)
+    "$PY_BIN" -m venv "$VENV"
     ok "Venv created"
 fi
 info "Installing Python dependencies..."
