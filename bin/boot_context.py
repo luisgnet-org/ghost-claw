@@ -327,7 +327,7 @@ def _extract_topic(text):
 
 def _get_latest_journal_entry():
     """Extract the most recent journal entry (first ## section)."""
-    journal = WORKSPACE / "memory" / "journal.md"
+    journal = WORKSPACE / "SOUL" / "journal.md"
     if not journal.exists():
         return None
     try:

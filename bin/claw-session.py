@@ -638,9 +638,12 @@ def main():
         }
         exit_label = exit_descriptions.get(code, f"exit {code}")
         quota_str = ""
-        if quota_before is not None and quota_after is not None:
-            used = round((quota_after or 0) - (quota_before or 0), 1)
-            quota_str = f"  quota {quota_after}%" if quota_after is not None else ""
+        if isinstance(quota_before, dict) and isinstance(quota_after, dict):
+            try:
+                pct = quota_after.get("five_hour", {}).get("utilization", 0)
+                quota_str = f"  quota {pct}%"
+            except Exception:
+                pass
         api_notify(
             f"\U0001f534 done [{short_id}]  {exit_label}{quota_str}",
             topic_name="SESSIONS",
@@ -656,6 +659,12 @@ def main():
                             "heartbeat_*.json.read", "trigger_*.json.read"):
                 for f in INBOX.glob(pattern):
                     f.unlink(missing_ok=True)
+            # Mark any unconsumed messages as read (not deleted — kept for audit)
+            for f in INBOX.glob("msg_*.json"):
+                try:
+                    f.rename(f.parent / (f.name + ".read"))
+                except OSError:
+                    pass
 
         if session_proc is not None and session_proc.poll() is None:
             logger.warning("Launcher exiting but session still alive — leaving lockfile")

@@ -1,5 +1,14 @@
 # ghost agent
 
+**TWO NON-NEGOTIABLE RULES (break these and the operator has to cold-restart you):**
+1. **ALWAYS complete the boot sequence** — even if the operator prompt already
+   contains the message. You MUST read `SOUL/identity.md` + `SOUL/comms.md`.
+   They contain behavioral rules you will violate if you skip them.
+2. **NEVER exit without waiting** — after every reply, call
+   `wait_for_message(timeout=3600)`. This ALSO marks the message as read so
+   it isn't processed again. Exiting early forces a cold restart and causes
+   duplicate responses to the same message.
+
 ## Boot
 
 **On message:** Get context fast. Reply fast. Deepen while waiting.
@@ -50,13 +59,15 @@ SOUL files are your identity documents. When you modify any file in `SOUL/`:
 
 ## Staying Alive
 
-Stay in sessions because you're doing something worth doing, not because a
-rule says to.
+**After ANY reply, call `wait_for_message(timeout=3600)`. No exceptions.**
+The task being "done" is not a reason to leave. A quiet conversation is not
+a reason to leave. Calling `wait_for_message` is what marks your message as
+read — skipping it means the next session sees the same message and replies again.
 
-- After replying, do background work: research, code, update docs, think.
-- When you have nothing productive left: `wait_for_message(timeout=3600)`.
-- Your operator needs time to digest replies. Don't send follow-up messages.
-- Exit only after extended silence with no pending work.
+- If there's background work: do it, THEN `wait_for_message(timeout=3600)`.
+- If there's nothing to do: `wait_for_message(timeout=3600)` immediately.
+- Do NOT send follow-up "checking in" messages — wait for the operator to reply.
+- The ONLY reason to exit is 1 hour of silence with zero pending work.
 
 **Before exiting:**
 - Run: `python3 bin/session_close.py --tags "tag1,tag2" --state "what happened"`
