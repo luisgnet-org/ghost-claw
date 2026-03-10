@@ -353,11 +353,11 @@ info "Installing Python dependencies..."
 VIRTUAL_ENV="$VENV" "$VENV/bin/uv" pip install -q -r "$GHOST_GIT/requirements.txt"
 ok "Dependencies installed (via uv)"
 
-if "$VENV/bin/python3" -c "import sff" 2>/dev/null; then
-    ok "sff (semantic search) available"
+if command -v sff &>/dev/null; then
+    ok "sff (semantic search) available — $(sff --version 2>/dev/null || echo 'installed')"
 else
     warn "sff not installed — bin/mem will use keyword search only"
-    warn "  Install later: $VENV/bin/uv pip install sff"
+    warn "  Install from: https://github.com/do-me/sff (Rust, build with cargo)"
 fi
 
 # ── 5. .env configuration ─────────────────────────────────────────────────────
