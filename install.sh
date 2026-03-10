@@ -588,6 +588,29 @@ PYEOF
     # ── 8. Start services ─────────────────────────────────────────────────────
     if [ "$NO_START" = false ]; then
         echo ""
+
+        # On reinstall: unload any already-registered services before reloading.
+        # Check registration via launchctl (service may be registered without a plist
+        # on disk if a previous install was incomplete).
+        if [ "$REINSTALL" = true ]; then
+            info "Reinstall: stopping existing services..."
+            for svc in claw-session daemon mcp-proxy; do
+                label="$LABEL_PREFIX.$svc"
+                plist="$LAUNCHD_DIR/$label.plist"
+                # Unload if registered (launchctl list returns 0 if known)
+                if launchctl list "$label" >/dev/null 2>&1; then
+                    if [ -f "$plist" ]; then
+                        launchctl unload "$plist" 2>/dev/null || true
+                    else
+                        # Registered but no plist on disk — use bootout
+                        launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+                    fi
+                    ok "Stopped $label"
+                fi
+            done
+            sleep 1
+        fi
+
         info "Starting services..."
         launchctl load "$LAUNCHD_DIR/$LABEL_PREFIX.mcp-proxy.plist" 2>/dev/null || true
         sleep 1
