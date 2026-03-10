@@ -122,7 +122,7 @@ try:
         ('can_edit_stories',       False, 'Edit Stories of Others'),
         ('can_delete_stories',     False, 'Delete Stories of Others'),
         ('can_restrict_members',   False, 'Ban Users'),
-        ('can_invite_users',       True,  'Add Users'),
+        ('can_invite_users',       False, 'Add Users'),
         ('can_pin_messages',       True,  'Pin Messages'),
         ('can_promote_members',    False, 'Add New Admins'),
         ('can_manage_video_chats', False, 'Manage Video Chats'),

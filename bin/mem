@@ -63,12 +63,8 @@ def _detect_sessions_dir():
     override = os.environ.get("MEM_SESSIONS_DIR", "")
     if override:
         return Path(override)
-    # Try slug-based detection under ~/.claude/projects/
     slug = str(_WORKSPACE_DIR).replace("/", "-").lstrip("-")
-    candidate = _HOME / ".claude" / "projects" / slug
-    if candidate.exists():
-        return candidate
-    # Try sandbox home (one level up from workspace, then home/)
+    # Try sandbox home first (one level up from workspace, then home/)
     sandbox_home = _WORKSPACE_DIR.parent / "home"
     if sandbox_home.exists():
         candidate = sandbox_home / ".claude" / "projects" / slug
@@ -78,7 +74,15 @@ def _detect_sessions_dir():
     agent_sessions = _WORKSPACE_DIR.parent / "sessions"
     if agent_sessions.exists():
         return agent_sessions
-    return _HOME / ".claude" / "projects"
+    # Only try host ~/.claude/projects/ if explicitly allowed
+    use_host = os.environ.get("USE_HOST_CLAUDE_SESSIONS", "false").lower() in ("true", "1", "yes")
+    if use_host:
+        candidate = _HOME / ".claude" / "projects" / slug
+        if candidate.exists():
+            return candidate
+        return _HOME / ".claude" / "projects"
+    # Default: workspace-local fallback
+    return _WORKSPACE_DIR / "sessions"
 
 SESSIONS_DIR = _detect_sessions_dir()
 

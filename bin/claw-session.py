@@ -77,6 +77,15 @@ AGENT_HOME = AGENT_DIR / "home"  # Fake HOME for isolated Claude config
 SANDBOX_PROFILE = AGENT_DIR / "sandbox.sb"
 SANDBOX_TEMPLATE = _SELF_DIR.parent / "config" / "sandbox.sb"   # ghost_claw/config/sandbox.sb
 
+# Load .env from GHOST_HOME (launchd doesn't inherit daemon env)
+_ENV_FILE = GHOST_HOME / ".env"
+if _ENV_FILE.exists():
+    for line in _ENV_FILE.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip())
+
 MCP_PORT = int(os.environ.get("MCP_PORT", "7865"))
 DAEMON_API = f"http://[::1]:{MCP_PORT}"
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -543,6 +552,11 @@ def main():
         env.pop("CLAUDECODE", None)
         env.pop("CLAUDE_CODE_ENTRYPOINT", None)
         env["HOME"] = str(AGENT_HOME)
+
+        # Memory isolation: propagate USE_HOST_CLAUDE_SESSIONS from .env
+        # Default false — subject agents can't read host ~/.claude/ sessions
+        if "USE_HOST_CLAUDE_SESSIONS" not in env:
+            env["USE_HOST_CLAUDE_SESSIONS"] = "false"
 
         # Ensure claude is findable: launchd starts with a stripped PATH that
         # may not include wherever the user installed claude (e.g. ~/.local/bin,

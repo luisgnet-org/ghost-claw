@@ -33,6 +33,7 @@ INSTANCE_ID=""
 AGENT_NAME="claw"
 SKIP_LAUNCHD=false
 NO_START=false
+REINSTALL=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --ghost-repo)  GHOST_REPO="$2";     shift 2 ;;
         --no-launchd)  SKIP_LAUNCHD=true;   shift ;;
         --no-start)    NO_START=true;       shift ;;
+        --reinstall)   REINSTALL=true;      shift ;;
         --help|-h)
             sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -161,17 +163,22 @@ tg_get_chat_id() {
         echo ""
     } > /dev/tty
 
-    # Get current update offset so we only catch fresh messages
+    # Flush ALL pending updates so we only catch fresh messages sent AFTER this point.
+    # getUpdates with offset=-1 returns only the latest update, then we confirm it.
     local offset=0
-    local offset_resp
-    offset_resp=$(curl -sf "https://api.telegram.org/bot${token}/getUpdates?limit=1" 2>/dev/null || true)
-    if [ -n "$offset_resp" ]; then
-        offset=$(echo "$offset_resp" | python3 -c "
+    local flush_resp
+    flush_resp=$(curl -sf "https://api.telegram.org/bot${token}/getUpdates?offset=-1&limit=1" 2>/dev/null || true)
+    if [ -n "$flush_resp" ]; then
+        offset=$(echo "$flush_resp" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 results = r.get('result', [])
 print(results[-1]['update_id'] + 1 if results else 0)
 " 2>/dev/null || echo "0")
+        # Confirm the offset so old updates are discarded
+        if [ "$offset" -gt 0 ]; then
+            curl -sf "https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&limit=0" >/dev/null 2>&1 || true
+        fi
     fi
 
     local chat_id=""
@@ -295,8 +302,8 @@ check_prereqs() {
 }
 check_prereqs
 
-# Conflict check before doing anything
-[ "$SKIP_LAUNCHD" = false ] && check_conflicts
+# Conflict check before doing anything (skip with --reinstall)
+[ "$SKIP_LAUNCHD" = false ] && [ "$REINSTALL" = false ] && check_conflicts
 
 # ── 1. Directory structure ────────────────────────────────────────────────────
 info "Creating directories..."
@@ -382,8 +389,22 @@ fi
 
 # Telegram bot token
 if [ -n "$TG_TOKEN" ]; then
-    ok "Telegram bot token already set — skipping"
-else
+    BOT_RESP=$(curl -sf "https://api.telegram.org/bot${TG_TOKEN}/getMe" 2>/dev/null || true)
+    BOT_NAME=$(echo "$BOT_RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print('@'+r['result']['username'])" 2>/dev/null || echo "unknown")
+    echo ""
+    echo -e " Current bot: ${BOLD}$BOT_NAME${NC}"
+    printf " Keep this bot? [Y/n] "
+    read -r KEEP_BOT < /dev/tty
+    if [[ "$KEEP_BOT" =~ ^[nN] ]]; then
+        TG_TOKEN=""
+        TG_CHAT_ID=""  # Reset chat ID too — different bot = different group
+        ENV_UPDATED=true
+    else
+        ok "Keeping bot $BOT_NAME"
+    fi
+fi
+
+if [ -z "$TG_TOKEN" ]; then
     echo " You'll need:"
     echo "   • Telegram bot token  — create one at https://t.me/BotFather"
     echo ""
@@ -413,8 +434,18 @@ fi
 
 # Chat ID
 if [ -n "$TG_CHAT_ID" ]; then
-    ok "Telegram chat ID already set ($TG_CHAT_ID) — skipping"
-else
+    echo -e " Current chat ID: ${BOLD}$TG_CHAT_ID${NC}"
+    printf " Keep this chat? [Y/n] "
+    read -r KEEP_CHAT < /dev/tty
+    if [[ "$KEEP_CHAT" =~ ^[nN] ]]; then
+        TG_CHAT_ID=""
+        ENV_UPDATED=true
+    else
+        ok "Keeping chat ID $TG_CHAT_ID"
+    fi
+fi
+
+if [ -z "$TG_CHAT_ID" ]; then
     TG_CHAT_ID=$(tg_get_chat_id "$TG_TOKEN")
     ENV_UPDATED=true
 fi
@@ -442,6 +473,10 @@ MCP_BACKEND_PORT=$MCP_BACKEND_PORT
 
 # Instance name (stable across directory renames)
 GHOST_INSTANCE=$INSTANCE_ID
+
+# Memory isolation: set to "true" to allow bin/mem to read host ~/.claude/ sessions
+# Default false — subject agents should not access host session history
+USE_HOST_CLAUDE_SESSIONS=false
 ENVEOF
     chmod 600 "$ENV_FILE"
     ok ".env written to $ENV_FILE"
